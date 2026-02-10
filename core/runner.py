@@ -1,0 +1,497 @@
+import time
+import os # v167.3: Fix missing import
+import logging
+import threading
+from typing import Callable, Optional
+
+from drivers.base_driver import BaseDriver
+from drivers.structure_driver import StructureDriver # v80
+from core.scenario import Scenario, Action
+
+class AutomationRunner:
+    def __init__(self, driver: BaseDriver, db=None):
+        self.driver = driver
+        self.db = db
+        # v73: Inject stop callback to driver if supported
+        if hasattr(self.driver, 'stop_check_callback'):
+            self.driver.stop_check_callback = lambda: self.stop_requested
+        
+        # v80: Structure Driver (Selectors)
+        self.structure_driver = StructureDriver()
+            
+        self.logger = logging.getLogger("Runner")
+        self.is_running = False
+        self.stop_requested = False
+        self.current_thread = None
+        self.current_thread = None
+        self.action_delay = 0.5 # Default delay in seconds
+        self.variables = {} # v167.16: Senaryo Değişkenleri
+
+    def run_scenario(self, scenario: Scenario, on_step_complete: Optional[Callable] = None, on_finish: Optional[Callable] = None, start_index: int = 0):
+        """
+        Senaryoyu ayrı bir iş parçacığında (thread) çalıştırır.
+        UI'ın donmasını engellemek için arka planda işlem yapar.
+        start_index: Senaryonun hangi adımından başlayacağını belirtir (0-based).
+        """
+        if self.is_running:
+            self.logger.warning("Şu anda zaten bir senaryo çalışıyor.")
+            return
+
+        self.stop_requested = False
+        self.is_running = True
+        
+        def _run():
+            self.logger.info(f"Senaryo başlatıldı: {scenario.name} (Başlangıç Adımı: {start_index + 1})")
+            success = True
+            success = True
+            error_msg = ""
+            # v167.17: Senaryo bazlı değişkenleri yükle
+            self.variables = scenario.variables.copy() if scenario.variables else {} 
+            self.logger.info(f"Senaryo Değişkenleri Yüklendi: {self.variables}")
+            
+            # v160.3: Start From Here Support
+            actions_to_run = scenario.actions[start_index:]
+            
+            if not actions_to_run:
+                self.logger.warning("Çalıştırılacak adım bulunamadı.")
+
+            # v160.4: Auto-Focus Logic (Debug Start)
+            # Eğer ortadan başladıysak, daha önce hangi uygulama açıldıysa onu bulup öne getirelim.
+            if start_index > 0:
+                self.logger.info("Debug modu: Hedef uygulama taranıyor...")
+                import os
+                found_target = False
+                
+                # Geriye doğru tara (start_index - 1 down to 0)
+                for i in range(start_index - 1, -1, -1):
+                    act = scenario.actions[i]
+                    if act.type == "LAUNCH_APP":
+                        path = act.params.get("path")
+                        if path:
+                            app_name = os.path.basename(path).split('.')[0].lower()
+                            self.logger.info(f"Hedef uygulama bulundu (Adım {i+1}): {app_name}")
+                            # Sadece öne getirmeyi dene (Driver'da var olan logic)
+                            # DesktopDriver olup olmadığını kontrol etsek iyi olur ama base driver'da yoksa patlamasın
+                            if hasattr(self.driver, 'bring_to_front'):
+                                self.driver.bring_to_front(app_name)
+                            found_target = True
+                            break
+                    elif act.type == "OPEN_URL":
+                        self.logger.info(f"Hedef tarayıcı bulundu (Adım {i+1})")
+                        if hasattr(self.driver, 'bring_to_front'):
+                            self.driver.bring_to_front("browser")
+                        found_target = True
+                        break
+                
+                if not found_target:
+                    self.logger.info("Auto-Focus: Öne getirilecek aktif bir uygulama/tarayıcı bulunamadı.")
+                else:
+                    self.logger.info("Auto-Focus: Hedef uygulama/tarayıcı odaklama sinyali gönderildi.")
+            
+            # Note: We need to keep track of the REAL index for logging/UI updates
+            for relative_index, action in enumerate(actions_to_run):
+                real_index = start_index + relative_index
+                
+                if self.stop_requested:
+                    self.logger.info("Senaryo kullanıcı tarafından durduruldu.")
+                    success = False
+                    error_msg = "Kullanıcı durdurdu."
+                    break
+
+                self.logger.info(f"Adım {real_index + 1}/{len(scenario.actions)}: {action.type} - {action.description}")
+                
+                # Küresel stabilizasyon gecikmesi
+                if real_index > 0: # Changed from 'index' to 'real_index'
+                    # v73: Durdurma kontrolü yapan stabilizasyon gecikmesi
+                    delay_start = time.time()
+                    while time.time() - delay_start < self.action_delay:
+                        if self.stop_requested: break
+                        time.sleep(0.05)
+                    
+                step_success = self._execute_action(action)
+
+                if on_step_complete:
+                    on_step_complete(real_index, step_success, action)
+
+                if not step_success:
+                    self.logger.error(f"Adım başarısız: {action.description}")
+                    success = False
+                    error_msg = f"Adım başarısız: {real_index+1}" # Changed from 'index' to 'real_index'
+                    # Başarısızlık durumunda durdurmalı mı? Şimdilik evet.
+                    break
+            
+            self.is_running = False
+            self.logger.info(f"Senaryo tamamlandı. Başarılı: {success}")
+            if on_finish:
+                on_finish(success, error_msg)
+
+        self.current_thread = threading.Thread(target=_run)
+        self.current_thread.daemon = True
+        self.current_thread.start()
+
+    def stop(self):
+        """Çalışan senaryoyu durdurma sinyali gönderir."""
+        if self.is_running:
+            self.stop_requested = True
+            self.logger.info("Durdurma isteği gönderildi...")
+
+    def _substitute_variables(self, text):
+        """v167.16: Metin içindeki {degisken} ifadelerini değerleriyle değiştirir."""
+        if not isinstance(text, str): return text
+        if not self.variables: return text
+        
+        for var_name, var_value in self.variables.items():
+            placeholder = f"${{{var_name}}}" # v167.19: Format changed to ${var}
+            if placeholder in text:
+                text = text.replace(placeholder, str(var_value))
+        return text
+
+    def _execute_action(self, action: Action) -> bool:
+        try:
+            # v167.16: Değişken Tanımlama
+            if action.type == "DEFINE_VARIABLES":
+                vars_list = action.params.get("variables", [])
+                for v in vars_list:
+                    self.variables[v["name"]] = v["value"]
+                self.logger.info(f"Değişkenler tanımlandı: {self.variables}")
+                return True
+
+            if action.type == "CLICK":
+                target = action.params.get("target")
+                # Variable Substitution
+                if isinstance(target, str): target = self._substitute_variables(target)
+                
+                text_hint = action.params.get("text_hint")
+                if text_hint: text_hint = self._substitute_variables(text_hint)
+                
+                button = action.params.get("button", "left")
+                timeout = int(action.params.get("timeout", 10))
+                confidence = action.params.get("confidence")
+                # v63: Action modelinden yeni parametreler
+                return self.driver.click(
+                    target, 
+                    timeout=timeout, 
+                    text_hint=text_hint, 
+                    button=button, 
+                    confidence=confidence,
+                    match_index=action.match_index,
+                    click_offset=action.offset
+                )
+            
+            elif action.type == "TYPE":
+                text = action.params.get("text", "")
+                text = self._substitute_variables(text) # v167.16
+                interval = action.params.get("interval", 0.1)
+                return self.driver.type_text(text, interval)
+            
+            elif action.type == "WAIT":
+                seconds = float(action.params.get("seconds", 1.0))
+                self.driver.wait(seconds)
+                return True
+            
+            elif action.type == "LAUNCH_APP":
+                path = action.params.get("path")
+                path = self._substitute_variables(path) # v167.16
+                return self.driver.launch_app(path)
+
+            elif action.type == "OPEN_URL":
+                url = action.params.get("url")
+                url = self._substitute_variables(url) # v167.16
+                return self.driver.open_url(url)
+            
+            elif action.type == "ASSERT_EXISTS":
+                target = action.params.get("target")
+                timeout = int(action.params.get("timeout", 10))
+                return self.driver.assert_exists(
+                    target, 
+                    timeout=timeout,
+                    match_index=action.match_index,
+                    click_offset=action.offset
+                )
+
+            # v167.24: GET_TEXT Action
+            elif action.type == "GET_TEXT":
+                selector_name = action.params.get("selector")
+                variable_name = action.params.get("variable")
+                
+                # Resolving selector from DB
+                if self.db:
+                    sel_row = self.db.get_selector_by_name(selector_name)
+                    if sel_row:
+                        # (id, name, content, type, ...)
+                        content = sel_row[2]
+                        # Fetch text using driver
+                        text_val = self.driver.get_text(content)
+                        
+                        # Save to variable
+                        if variable_name:
+                            self.variables[variable_name] = text_val
+                            self.logger.info(f"GET_TEXT: '{text_val}' -> ${{{variable_name}}}")
+                        return True
+                    else:
+                        self.logger.error(f"GET_TEXT: Selector '{selector_name}' bulunamadı.")
+                        return False
+                return False
+
+            # v167.24: CHECK_TEXT Action (Assertion)
+            elif action.type == "CHECK_TEXT":
+                variable_name = action.params.get("variable")
+                expected_value = action.params.get("value")
+                condition = action.params.get("condition", "equals") # equals, contains
+                
+                # Get variable value
+                actual_value = str(self.variables.get(variable_name, ""))
+                expected_value = self._substitute_variables(str(expected_value))
+                
+                self.logger.info(f"CHECK_TEXT: ${{{variable_name}}} ('{actual_value}') vs '{expected_value}' ({condition})")
+                
+                if condition == "equals":
+                    if actual_value == expected_value:
+                        self.logger.info("CHECK_TEXT: Başarılı (Eşit)")
+                        return True
+                    else:
+                        self.logger.error(f"CHECK_TEXT: Başarısız! Beklenen: '{expected_value}', Gelen: '{actual_value}'")
+                        return False
+                        
+                elif condition == "contains":
+                    if expected_value in actual_value:
+                        self.logger.info("CHECK_TEXT: Başarılı (İçeriyor)")
+                        return True
+                    else:
+                        self.logger.error(f"CHECK_TEXT: Başarısız! '{actual_value}', '{expected_value}' içermiyor.")
+                        return False
+                
+                return False
+
+            elif action.type == "POPUP_CHECK":
+                triggers = action.params.get("triggers", [])
+                any_clicked = False
+                
+                for trig in triggers:
+                    t_type = trig.get("type")
+                    t_value = trig.get("value") # Name
+                    
+                    try:
+                        if t_type == "selector":
+                            # DB'den selector içeriğini al
+                            # self.driver.db... erişimi riskli olabilir mi? Driver DB biliyor mu?
+                            # DesktopDriver __init__ db alıyor.
+                            if hasattr(self.driver, 'db') and self.driver.db:
+                                sel_row = self.driver.db.get_selector_by_name(t_value)
+                                if sel_row:
+                                    # (id, name, content, type, ...)
+                                    content = sel_row[2] # 3. eleman content
+                                    
+                                    # v160.7: DB'deki content JSON string olabilir, parse et
+                                    try:
+                                        import json
+                                        target = json.loads(content)
+                                    except:
+                                        target = content
+
+                                    # v160.7: Selector'lar için StructureDriver kullanılır
+                                    if self.structure_driver.click_element(target):
+                                        self.logger.info(f"Pop-up yakalandı ve tıklandı (Selector): {t_value}")
+                                        any_clicked = True
+                                        break # v160.8: Bir tane bulunduysa dur.
+                                        # Devam etmeli miyiz? Genelde bir pop-up çıkar. 
+                                        # Ama birden fazla da olabilir. Kullanıcı isteği: "herbirine ... bakacak"
+                                        # Hepsine bakalım.
+                            else:
+                                self.logger.warning("DB erişimi yok, selector çözülemedi.")
+
+                        elif t_type == "image":
+                            # Asset'ten görseli al, geçici dosyaya yaz
+                            if hasattr(self.driver, 'db') and self.driver.db:
+                                asset_row = self.driver.db.get_asset_by_name(t_value)
+                                if asset_row:
+                                    # (id, name, data, type, created)
+                                    blob = asset_row[2]
+                                    import tempfile
+                                    
+                                    with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
+                                        tmp.write(blob)
+                                        tmp_path = tmp.name
+                                    
+                                    try:
+                                        # Click dene
+                                        if self.driver.click(tmp_path, timeout=2, confidence=0.8):
+                                            self.logger.info(f"Pop-up yakalandı ve tıklandı (Görsel): {t_value}")
+                                            any_clicked = True
+                                            break # v160.8: Bir tane bulunduysa dur.
+                                    finally:
+                                        try:
+                                            # import os # v167.4: Removed local import
+                                            os.remove(tmp_path)
+                                        except: pass
+
+                    except Exception as e:
+                        self.logger.warning(f"Pop-up tetikleyici hatası ({t_value}): {e}")
+                
+                # Pop-up olsa da olmasa da bu adım başarılı sayılır (Blocking değil)
+                return True
+            
+            elif action.type == "VALIDATE_WINDOW":
+                title = action.params.get("title")
+                timeout = int(action.params.get("timeout", 5))
+                return self.driver.validate_window(title, timeout)
+
+            elif action.type == "VALIDATE_ELEMENT":
+                window_title = action.params.get("window_title")
+                element_name = action.params.get("element_name")
+                timeout = int(action.params.get("timeout", 5))
+                return self.driver.validate_element(window_title, element_name, timeout)
+            
+            elif action.type == "PRESS_KEY":
+                key = action.params.get("key")
+                return self.driver.press_key(key)
+
+            elif action.type == "SCROLL":
+                amount = int(action.params.get("amount", 0))
+                return self.driver.scroll(amount)
+
+            elif action.type == "SCROLL_UNTIL":
+                direction = action.params.get("direction", "down")
+                step = int(action.params.get("step", 500)) # v167.14: Default 300 -> 500
+                max_steps = int(action.params.get("max_steps", 10))
+                
+                # v163.0: Selector Support
+                if action.params.get("by_selector"):
+                    selector = action.params.get("selector")
+                    # Parse if it's a JSON string
+                    if isinstance(selector, str):
+                        try:
+                            import json
+                            selector = json.loads(selector)
+                        except: 
+                            # v167.9: JSON değilse Kütüphane (DB) üzerinden çözmeyi dene
+                            # v167.12: DB Erişim Düzeltmesi (self.driver.db kullan)
+                            db_instance = getattr(self, 'db', None) or getattr(self.driver, 'db', None)
+                            
+                            if db_instance:
+                                db_sel = db_instance.get_selector_by_name(selector)
+                                if db_sel and db_sel[2]: # row[2] = content (json string)
+                                    try:
+                                        selector = json.loads(db_sel[2])
+                                        self.logger.info(f"Akıllı Kaydırma: Kütüphaneden selector yüklendi: {db_sel[1]}")
+                                    except: pass
+                    
+                    # v167.8: Selector Tip Doğrulama (Güvenlik Kapısı)
+                    if not isinstance(selector, dict):
+                        self.logger.error(f"Akıllı Kaydırma Hatası: Geçersiz selector formatı. (Beklenen: dict, Alınan: {type(selector).__name__}) - Değer: {selector}")
+                        return False
+                    
+                    self.logger.info(f"Akıllı Kaydırma (Selector) Başladı: {direction}")
+                    scroll_amount = -step if direction == "down" else step
+                    
+                    for i in range(max_steps):
+                        if self.stop_requested: return False
+                        
+                        try:
+                            # Elementi ara (Sığ arama için hızlı timeout)
+                            element = self.structure_driver.find_element(selector, timeout=0.2) # v167.15: Hızlandırıldı (1s -> 0.2s)
+                            if element:
+                                # v167.7: Görünürlük Kontrolü (Off-screen Check)
+                                # Element ağaçta olsa bile ekranda görünmüyorsa "bulundu" sayma.
+                                is_visible = True
+                                try:
+                                    # uiautomation standard property
+                                    if hasattr(element, "IsOffscreen") and element.IsOffscreen:
+                                        is_visible = False
+                                    elif hasattr(element, "BoundingRectangle"):
+                                        rect = element.BoundingRectangle
+                                        if rect.width() <= 0 or rect.height() <= 0:
+                                            is_visible = False
+                                except: pass
+
+                                if is_visible:
+                                    self.logger.info(f"Akıllı Kaydırma: Element bulundu ve GÖRÜNÜR! (Adım {i+1})")
+                                    return True
+                                else:
+                                    self.logger.info(f"Akıllı Kaydırma: Element bulundu ama EKRAN DIŞI. Kaydırmaya devam... (Adım {i+1})")
+                        except Exception as e:
+                            self.logger.warning(f"Akıllı Kaydırma (Selector) Hatası: {e}")
+                        
+                        self.logger.info(f"Akıllı Kaydırma (Selector): Bulunamadı, kaydırılıyor ({i+1}/{max_steps})...")
+                        try:
+                            self.driver.scroll(scroll_amount)
+                        except Exception as e:
+                            self.logger.error(f"Kaydırma Hatası: {e}")
+                            self.logger.info(f"Akıllı Kaydırma (Selector): Bulunamadı, kaydırılıyor ({i+1}/{max_steps})...")
+                        self.driver.scroll(scroll_amount)
+                        time.sleep(0.2) # v167.14: Hızlandırıldı (0.5 -> 0.2)
+                    
+                    self.logger.warning("Akıllı Kaydırma (Selector): Hedef bulunamadı.")
+                    return False
+                else:
+                    # Original Image-based logic
+                    target = action.params.get("target")
+                    
+                    # v165.0: Library Asset Support
+                    tmp_target = None
+                    # Check if target is a file path; if not, assume it might be a library asset name
+                    # But first, we need to handle if target is None
+                    if target and not os.path.exists(target):
+                        # v167.1: Use self.db instead of self.driver.db
+                        if self.db:
+                            asset_row = self.db.get_asset_by_name(target)
+                            if asset_row:
+                                blob = asset_row[2]
+                                import tempfile
+                                with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
+                                    tmp.write(blob)
+                                    tmp_target = tmp.name
+                                target = tmp_target
+                                self.logger.info(f"Kütüphane görseli kullanılıyor: {tmp_target}")
+                    
+                    try:
+                        return self.driver.scroll_until_found(
+                            target, 
+                            direction, 
+                            step=step, 
+                            max_steps=max_steps,
+                            match_index=action.match_index,
+                            click_offset=action.offset
+                        )
+                    finally:
+                        if tmp_target:
+                            try: os.remove(tmp_target)
+                            except: pass
+
+            elif action.type == "READ_TEXT":
+                region = action.params.get("region")
+                result = self.driver.read_text(region)
+                action.result = result
+                return True
+            
+            elif action.type == "HANDLE_POPUP":
+                target = action.params.get("target")
+                return self.driver.handle_popup(target)
+
+            # v83: Yeni Yapısal Sürücü İşleyicileri (Selector)
+            elif action.type == "CLICK_SELECTOR":
+                selector = action.params.get("selector")
+                button = action.params.get("button", "left")
+                timeout = int(action.params.get("timeout", 10))
+                return self.structure_driver.click_element(selector, button=button)
+            
+            elif action.type == "TYPE_SELECTOR":
+                selector = action.params.get("selector")
+                text = action.params.get("text", "")
+                timeout = int(action.params.get("timeout", 10))
+                
+                # 1. Odaklanmak için tıkla
+                if self.structure_driver.click_element(selector):
+                    time.sleep(0.5) # Odaklanma için bekle
+                    # 2. Metni yaz (Global klavye sürücüsünü kullanır)
+                    self.driver.type_text(text, interval=0.1)
+                    return True
+                return False
+
+            else:
+                self.logger.error(f"Bilinmeyen aksiyon tipi: {action.type}")
+                return False
+                
+        except Exception as e:
+            self.logger.error(f"Aksiyon hatası ({action.type}): {e}")
+            return False

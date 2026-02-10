@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+
+# Distribution / Build
+build/
+dist/
+*.egg-info/
+
+# Logs
+*.log
+jmeter.log
+
+# IDE settings
+.idea/
+.vscode/
+*.swp
+
+# Temporary files
+temp_method.txt
