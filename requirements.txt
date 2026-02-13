@@ -7,3 +7,4 @@ mouseinfo
 pyinstaller
 pywinauto
 pynput
+psutil

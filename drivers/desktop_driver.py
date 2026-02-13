@@ -7,6 +7,8 @@ from PIL import Image
 
 from drivers.base_driver import BaseDriver
 
+import psutil # v167.38: Strict Process Matching
+
 # PyAutoGUI fail-safe
 pyautogui.FAILSAFE = True
 
@@ -28,8 +30,8 @@ class DesktopDriver(BaseDriver):
         self.logger.info(f"Uygulama başlatılıyor: {app_path}")
         try:
             os.startfile(app_path)
-            # Uygulama adını tahmin et (exe adından)
-            app_name = os.path.basename(app_path).split('.')[0].lower()
+            # v167.38: Fix - Exe adını tam olarak kullan
+            app_name = os.path.basename(app_path)
             return self.bring_to_front(app_name)
         except Exception as e:
             self.logger.error(f"Uygulama başlatılamadı: {e}")
@@ -53,6 +55,10 @@ class DesktopDriver(BaseDriver):
         # v160.11: Arama türünü belirle
         is_browser_search = name_hint in ["browser", "web"] or name_hint in browser_keywords
         
+        # v167.38: Strict Process Matching Mode
+        # Eğer name_hint ".exe" ile bitiyorsa, Process Matching (PID) kullan.
+        is_process_match = name_hint.lower().endswith(".exe")
+        
         keywords = []
         if name_hint in ["browser", "web"]:
              keywords = browser_keywords
@@ -75,15 +81,32 @@ class DesktopDriver(BaseDriver):
                     # Kendi aracımızı ASLA maksimize etme
                     if our_tool_title.lower() in title_lower: continue
                     
-                    # Hedef pencereyi bulmaya çalış (Hem tam hem de normalleştirilmiş eşleşme)
                     match = False
-                    for i, kw in enumerate(keywords):
-                        kw_norm = norm_keywords[i]
-                        if kw in title_lower or (kw_norm and kw_norm in title_norm):
-                            match = True
-                            break
                     
-                    if match and not is_browser_search:
+                    # YÖNTEM 1: STRICT PROCESS MATCHING (PID Kontrolü)
+                    if is_process_match:
+                        try:
+                            pid = win.process_id()
+                            proc = psutil.Process(pid)
+                            proc_name = proc.name().lower()
+                            # Hedef exe adı ile çalışan process adı aynı mı?
+                            if proc_name == name_hint.lower():
+                                match = True
+                                self.logger.info(f"Process Match Onaylandı: {proc_name} (PID: {pid})")
+                        except Exception as pe:
+                            # Erişim hatası veya process kapanmış olabilir
+                            pass
+                    
+                    # YÖNTEM 2: STANDARD TITLE MATCHING (Process Match değilse veya başarısızsa)
+                    if not match and not is_process_match:
+                        # Hedef pencereyi bulmaya çalış (Hem tam hem de normalleştirilmiş eşleşme)
+                        for i, kw in enumerate(keywords):
+                            kw_norm = norm_keywords[i]
+                            if kw in title_lower or (kw_norm and kw_norm in title_norm):
+                                match = True
+                                break
+                    
+                    if match and not is_browser_search and not is_process_match:
                         # v160.11: Akıllı Filtreleme - Eğer uygulama arıyorsak ama pencere başlığında 
                         # başka bir tarayıcı adı geçiyorsa (örn: JMeter araması yapılan Chrome sekmesi), atla.
                         if any(bkw in title_lower for bkw in browser_keywords if bkw != name_hint):
@@ -442,59 +465,41 @@ class DesktopDriver(BaseDriver):
             self.logger.debug(f"OpenCV Vision Hatası: {e}")
             return None
 
+
     def type_text(self, text: str, interval: float = 0.1) -> bool:
         """
-        Metin yazar. (v167.23: PowerShell Clipboard + Paste)
+        Metin yazar. (v167.47: Immediate Stop Support)
         """
         try:
-            self.logger.info(f"Metin yapıştırılıyor: {[c for c in text]}")
+            import random
+            from pynput.keyboard import Controller
             
-            # --- STRATEGY: PowerShell (Proven to work) ---
-            def set_clipboard(text):
-                try:
-                    import subprocess
-                    import base64
-                    # Encode to Base64 UTF-16LE (Windows Internal Encoding)
-                    b64_data = base64.b64encode(text.encode('utf-16le')).decode('ascii')
-                    # Set-Clipboard command
-                    ps_cmd = f"Set-Clipboard -Value ([System.Text.Encoding]::Unicode.GetString([System.Convert]::FromBase64String('{b64_data}')))"
-                    
-                    startupinfo = subprocess.STARTUPINFO()
-                    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-                    
-                    subprocess.run(
-                        ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_cmd],
-                        startupinfo=startupinfo,
-                        creationflags=subprocess.CREATE_NO_WINDOW,
-                        check=True
-                    )
-                    return True
-                except Exception as e:
-                    print(f"PS Error: {e}")
+            keyboard = Controller()
+            self.logger.info(f"Metin yazılıyor (İnsan Modu + Türkçe): '{text[:50]}{'...' if len(text) > 50 else ''}'")
+            
+            # Character-by-character typing with random jitter
+            for char in text:
+                # v167.47: Immediate stop check
+                if self.stop_check_callback and self.stop_check_callback():
+                    self.logger.info("Metin yazımı durduruldu.")
                     return False
-
-            # Execute Strategy
-            if set_clipboard(text):
-                self.logger.info("Clipboard: PowerShell ile panoya alındı.")
-            else:
-                self.logger.error("Clipboard: Panoya alınamadı! Standart yazım deneniyor.")
-                # Fallback
-                import random
-                for char in text:
-                    pyautogui.write(char)
-                    jitter = random.uniform(0, 0.05) if interval >= 0.05 else random.uniform(0, 0.01)
-                    time.sleep(interval + jitter)
-                return True
-
-            # Paste
-            time.sleep(0.2)
-            pyautogui.hotkey('ctrl', 'v')
-            time.sleep(0.2)
+                
+                # Add random variation to typing speed (human-like)
+                jitter = random.uniform(0, 0.05) if interval >= 0.05 else random.uniform(0, 0.01)
+                
+                # Type the character using pynput (supports Unicode/Turkish)
+                keyboard.type(char)
+                
+                # Wait with jitter
+                time.sleep(interval + jitter)
+            
+            self.logger.info(f"Metin yazıldı: {len(text)} karakter")
             return True
 
         except Exception as e: 
             self.logger.error(f"Yazma hatası: {e}")
             return False
+
 
     def get_text(self, selector: str) -> str:
         """

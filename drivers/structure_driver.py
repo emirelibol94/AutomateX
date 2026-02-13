@@ -11,8 +11,10 @@ class StructureDriver:
     Windows UI Otomasyon Sürücüsü.
     UI elementleri ile programsal olarak etkileşime geçmek için 'uiautomation' kütüphanesini kullanır.
     """
-    def __init__(self):
+
+    def __init__(self, stop_check_callback=None):
         self.logger = logging.getLogger("StructureDriver")
+        self.stop_check_callback = stop_check_callback
         if not auto:
             self.logger.error("uiautomation kütüphanesi bulunamadı. Lütfen 'pip install uiautomation' ile kurun.")
 
@@ -38,45 +40,81 @@ class StructureDriver:
             pass
 
     def get_selector(self, element) -> dict:
-        """Element için benzersiz bir seçici (selector) çıkarır."""
+        """
+        Element için 'UiPath-vari' akıllı ve sağlam bir seçici (Full UI Lineage) çıkarır.
+        """
         if not element: return {}
         try:
+            # 1. Hedef Elementin Kendisi
             selector = {
                 "ControlName": element.Name,
                 "ControlType": element.ControlTypeName,
-                "LocalizedControlType": element.LocalizedControlType, # v87: Yerelleştirilmiş tip adı
+                "LocalizedControlType": element.LocalizedControlType,
                 "AutomationId": element.AutomationId,
                 "ClassName": element.ClassName,
-                # v93: Akıllı Ebeveyn Yakalama
-                "ParentName": None,
-                "ParentControlType": None,
-                # v102: Pencere Kapsamı
-                "WindowName": None,
-                "WindowClassName": None
+                "ProcessId": element.ProcessId
             }
             
-            # Ebeveyni Yakala (Bir Üst Seviye)
-            try:
-                parent = element.GetParent()
-                if parent:
-                    selector["ParentName"] = parent.Name
-                    selector["ParentControlType"] = parent.ControlTypeName
-            except:
-                pass
+            # 2. UI Soyağacı (Lineage) Çıkarma
+            # Window -> ... -> Parent -> Element
+            # Her bir atayı detaylı kaydediyoruz.
+            ui_path = []
+            current = element
             
-            # v102: Pencere ve Kapsam İndeksini Yakala
-            search_scope = None
-            try:
-                top_level = element.GetTopLevelControl()
-                if top_level:
-                    selector["WindowName"] = top_level.Name
-                    selector["WindowClassName"] = top_level.ClassName
-                    search_scope = top_level
-            except:
-                pass
+            # En fazla 20 seviye yukarı çık
+            for _ in range(20):
+                try:
+                    # Pencereye geldik mi?
+                    if current.ControlTypeName == "WindowControl":
+                        # Pencere bilgisini hem yola hem de ana selector'a ekle
+                        win_node = {
+                            "Role": "Window",
+                            "Type": current.ControlTypeName,
+                            "Name": current.Name,
+                            "Class": current.ClassName,
+                            "Process": current.ProcessId
+                        }
+                        ui_path.insert(0, win_node)
+                        selector["WindowName"] = current.Name
+                        selector["WindowClassName"] = current.ClassName
+                        break
+                        
+                    if not current: break
+                    
+                    # Bu atanın kardeşleri arasındaki sırasını (Index) bul
+                    sibling_index = 1
+                    try:
+                        parent = current.GetParentControl()
+                        if parent:
+                            # Sadece aynı tipteki (Role) kardeşleri say
+                            for child in parent.GetChildren():
+                                if child == current: break
+                                if child.ControlTypeName == current.ControlTypeName:
+                                    sibling_index += 1
+                    except: pass
+
+                    # Düğüm Bilgisi
+                    node = {
+                        "Role": current.LocalizedControlType, # Örn: "group", "pane"
+                        "Type": current.ControlTypeName,      # Örn: "GroupControl"
+                        "Name": current.Name,
+                        "Id": current.AutomationId,
+                        "Class": current.ClassName,
+                        "Index": sibling_index
+                    }
+                    
+                    # Başa ekle (Yukarı çıkıyoruz)
+                    ui_path.insert(0, node)
+                    
+                    current = current.GetParentControl()
+                except Exception:
+                    break
             
-            # Boş değerleri temizle
+            # Yolu Kaydet
+            selector["UIPath"] = ui_path
+            
             return {k: v for k, v in selector.items() if v}
+
         except Exception as e:
             self.logger.error(f"Selector çıkarılırken hata: {e}")
             return {}
@@ -102,245 +140,312 @@ class StructureDriver:
     def _matches_criteria(self, control, criteria):
         """Bir kontrolün kriter sözlüğüne uyup uymadığını kontrol eden yardımcı metod."""
         try:
-            if "Name" in criteria and control.Name != criteria["Name"]: return False
-            if "AutomationId" in criteria and control.AutomationId != criteria["AutomationId"]: return False
-            if "ControlType" in criteria and control.ControlTypeId != criteria["ControlType"]: return False
-            if "ClassName" in criteria and control.ClassName != criteria["ClassName"]: return False
+            # v167.51: Daha esnek eşleşme (Bire bir ama kırılgan olmayan)
+            if "Name" in criteria:
+                # İsim boşluklarını temizle ve küçük harfe çevir
+                c_name = control.Name.strip().lower()
+                Get_name = criteria["Name"].strip().lower()
+                if c_name != Get_name: 
+                    return False
+            
+            if "AutomationId" in criteria:
+                if control.AutomationId != criteria["AutomationId"]: 
+                     return False
+                     
+            if "ControlType" in criteria:
+                if control.ControlTypeId != criteria["ControlType"]: 
+                    return False
+            
+            # v167.51: ClassName kapsama kontrolü (Tam eşitlik yerine 'in')
+            # Örn: "WindowsForms10.BUTTON.app.0.141b42a_r6_ad1" -> "WindowsForms10.BUTTON"
+            if "ClassName" in criteria:
+                # Eğer kayıtlı class ismi, bulunanın içinde geçiyorsa kabul et.
+                # Tam tersi de olabilir (dinamik ekler)
+                c_class = control.ClassName
+                t_class = criteria["ClassName"]
+                
+                if t_class not in c_class and c_class not in t_class:
+                     return False
+                    
             return True
         except:
             return False
 
+    def _find_window_scope(self, window_name: str, window_class: str = None) -> object:
+        """Pencere ismine ve sınıfına göre esnek arama yapar."""
+        if not window_name: return None
+        
+        # 1. Tam Eşleşme Dene (Hızlı)
+        try:
+            criteria = {"Name": window_name, "ControlTypeName": "WindowControl"}
+            if window_class: criteria["ClassName"] = window_class
+            
+            win = auto.WindowControl(searchDepth=1, **criteria)
+            if win.Exists(0.1):
+                return win
+        except: pass
+        
+        # 2. Esnek Eşleşme (Tüm üst seviye pencereleri tara)
+        self.logger.info(f"Pencere tam bulunamadı, esnek aranıyor: '{window_name}'")
+        try:
+            root = auto.GetRootControl()
+            # Sadece üst seviye (Depth=1) pencereleri gez
+            for win in root.GetChildren():
+                if win.ControlTypeName != "WindowControl": continue
+                
+                # İsim Kontrolü (Case-insensitive & Contains)
+                c_name = win.Name.strip().lower()
+                t_name = window_name.strip().lower()
+                
+                match = False
+                if t_name in c_name or c_name in t_name: # Karşılıklı kapsama
+                     match = True
+                
+                # Sınıf Kontrolü (Varsa)
+                if match and window_class:
+                    if window_class not in win.ClassName: # Sınıf tutmuyorsa ele
+                        match = False
+                
+                if match:
+                    self.logger.info(f"Esnek Pencere Bulundu: '{win.Name}'")
+                    return win
+                    
+        except Exception as e:
+            self.logger.warning(f"Esnek pencere arama hatası: {e}")
+            
+        return None
+
     def find_element(self, selector: dict, timeout: int = 10):
-        """Katı (Strict) ve yerel-bağımsız eşleşme kullanarak elementi bulur (UiPath Tarzı)."""
+        """
+        'UiPath-vari' Akıllı Element Bulma (Flexible Drill-Down).
+        Soyağacını (UiPath) takip eder, yol bozulursa kendini onarır (Self-Repair).
+        """
         if not auto: return None
         
         start_time = time.time()
-        self.logger.info(f"Katı Arama: {selector} (Zaman Aşımı: {timeout}s)")
+        # self.logger.info(f"Akıllı Arama Başladı: {selector.get('ControlName', 'Unknown')}")
         
-        # v81: Eğer çapa (Anchor) kullanıyorsak, Ebeveyn kapsamında sığ arama yapmak isteriz
-        search_depth = 0xFFFFFFFF
-        root = auto.GetRootControl()
-
-        # 1. Kriterleri Hazırla
-        # Stringler (Dil bağımlı) yerine Integer ID'lere (Platform bağımsız) güveniyoruz.
-        criteria = {}
-        
-        # İsim (Name)
-        if selector.get("ControlName"): 
-            criteria["Name"] = selector["ControlName"]
-            
-        # Otomasyon ID (AutomationId)
-        if selector.get("AutomationId"): 
-            criteria["AutomationId"] = selector["AutomationId"]
-            
-        # Sınıf Adı (ClassName - Opsiyonel ama iyi)
-        if selector.get("ClassName"):
-            criteria["ClassName"] = selector["ClassName"]
-
-        # Kontrol Tipi (Control Type)
-        # String -> Int dönüşümü yapmalıyız. Başarısız olursak filtrelemeye eklemeyiz.
-        if selector.get("ControlType"):
-            type_id = self._get_control_type_id(selector["ControlType"])
-            if type_id:
-                criteria["ControlType"] = type_id
-
-        # v99: İndeks Desteği
-        target_index = selector.get("foundIndex", 1) # Varsayılan: 1. eşleşme
+        # UI Path var mı? (Yeni Sistem)
+        ui_path = selector.get("UIPath")
+        if not ui_path or not isinstance(ui_path, list):
+             # Eski sistem veya basit selector ise Klasik Arama yap (Geri uyumluluk)
+             return self._find_element_classic(selector, timeout)
 
         while time.time() - start_time < timeout:
+            if self.stop_check_callback and self.stop_check_callback(): return None
+            
             try:
-                # v81: Çapa Mantığı (Sibling Fallback ile - v85)
-                # Eğer seçicide 'anchor' varsa, önce çapayı bulmalıyız.
-                search_scope = None
+                # 1. Başlangıç Noktası: Pencereyi Bul
+                current_node = None
+                window_node = ui_path[0] # İlk düğüm her zaman Window olmalı
                 
-                if "anchor" in selector:
-                    anchor_sel = selector["anchor"]
-                    self.logger.info(f"Çapa Aranıyor: {anchor_sel.get('ControlName', 'Bilinmiyor')}")
+                # Pencereyi bulmaya çalış (Process ID ve Class ile daha sağlam)
+                found_window = self._find_window_robust(window_node)
+                if not found_window:
+                    self.logger.warning(f"Ana pencere bulunamadı: {window_node.get('Name')}")
+                    time.sleep(0.5)
+                    continue
+                
+                current_node = found_window
+                
+                # 2. Yolu Takip Et (Drill-Down)
+                # Pencereden sonraki düğümlerden başla
+                path_broken = False
+                
+                for i in range(1, len(ui_path)):
+                    target_node = ui_path[i]
+                    found_child = None
                     
-                    # Çapayı Bul (Özyinelemeli çağrı)
-                    anchor_element = self.find_element(anchor_sel, timeout=1) 
-                    
-                    if anchor_element and anchor_element.Exists(0.1):
-                        self.logger.info("Çapa BULUNDU!")
-                        
-                        # Strateji A: Ebeveyn Kapsamı (İdeal)
-                        # Hedefi ebeveyn kapsamı İÇİNDE bulmaya çalışırız.
-                        # Eğer orada bulamazsak YUKARI tırmanmalıyız.
-                        
-                        current_scope_element = None
-                        
-                        try:
-                            parent = anchor_element.GetParentControl()
-                            if parent:
-                                current_scope_element = parent
-                                self.logger.info("Çapa Stratejisi A: Ebeveyn Kapsamı Kontrol Ediliyor...")
-                                pass
-                        except:
-                            self.logger.warning("Çapa Stratejisi A Başarısız: Ebeveyn alınamadı.")
+                    # 1. Strateji: İndeks (En Hızlı)
+                    try:
+                        child_idx = target_node.get("Index", 1)
+                        child_type = self._get_control_type_id(target_node["Type"])
+                        match_count = 0
+                        for child in current_node.GetChildren():
+                            if child.ControlTypeId == child_type:
+                                match_count += 1
+                                if match_count == child_idx:
+                                    if self._verify_node_match(child, target_node, loose=True):
+                                        found_child = child
+                                        break
+                    except: pass
 
-                        # Strateji C: Yukarı Tırman (Grandparent / Great-Grandparent) - v85.2
-                        # "Kuzen" problemini çözer (div/div/label vs div/div/input)
-                        # 3 seviyeye kadar yukarı deneriz.
-                        
-                        found_valid_scope = False
-                        climber = anchor_element
-                        
-                        for level in range(3): # 0=Parent, 1=Grandparent, 2=GreatGrandparent
-                            try:
-                                climber = climber.GetParentControl()
-                                if not climber: break
-                                
-                                # Hedef bu kapsamda var mı kontrol et?
-                                # Hızlı kontrol için geçici kriterler
-                                val_criteria = criteria.copy()
-                                if not val_criteria: 
-                                    pass
-                                    
-                                # Hızlı Kontrol: Bu kapsam hedefi içeriyor mu?
-                                # Tek bir eşleşme bulmak için WalkControl kullan
-                                found_in_scope = False
-                                for _ in auto.WalkControl(climber, maxDepth=2 + level): # Sığ kontrol
-                                     if self._matches_criteria(_, criteria):
-                                         found_in_scope = True
-                                         break
-                                
-                                if found_in_scope:
-                                    search_scope = climber
-                                    self.logger.info(f"Çapa Stratejisi C: Ortak ata Seviye {level+1} bulundu (Kapsam: {climber.Name} {climber.ClassName})")
-                                    found_valid_scope = True
-                                    break
-                                else:
-                                    self.logger.debug(f"Çapa Stratejisi C: Hedef Seviye {level+1} kapsamında bulunamadı. Tırmanılıyor...")
-                                    
-                            except Exception as e:
-                                self.logger.warning(f"Çapa Tırmanma Hatası (Seviye {level}): {e}")
+                    # 2. Strateji: Özellik Araması (Name/ID)
+                    if not found_child:
+                        criteria = self._create_node_criteria(target_node)
+                        for child in current_node.GetChildren():
+                            if self._matches_criteria(child, criteria):
+                                found_child = child
                                 break
+                    
+                    # 3. Kendi Kendini Onarma (Self-Repair & Skip Level)
+                    if not found_child:
+                        # self.logger.warning(f"Bağlantı koptu: {target_node.get('Name')}. Onarılmaya çalışılıyor...")
                         
-                        if not found_valid_scope:
-                            pass
-                            # Aşağıda global aramaya (fallback) düşecek.
-                            
-                        # Strateji B: Kardeş Kapsamı (Ebeveyn başarısızsa veya güvenli olmak istiyorsak)
-                        # NOT: Ebeveyn almak genelde daha güvenlidir çünkü Hedef ağaçta Çapa'dan ÖNCE olabilir.
-                        if not search_scope:
-                            try:
-                                next_sibling = anchor_element.GetNextSiblingControl()
-                                if next_sibling:
-                                    search_scope = next_sibling
-                                    self.logger.info("Çapa Stratejisi B: Sonraki Kardeş Kapsamı kullanılıyor.")
-                            except:
-                                self.logger.warning("Çapa Stratejisi B Başarısız: Sonraki Kardeş alınamadı.")
-                                
-                    else:
-                        self.logger.warning("Çapa BULUNAMADI. Geri çekilme (Global Arama) deneniyor...")
-
-                # Kök Kapsamı Belirle
-                current_root = root
-                if search_scope:
-                     current_root = search_scope
-                
-                # Pencere Kapsamı (Opsiyonel ama önerilir)
-                elif selector.get("WindowName"):
-                    # İsme göre Hızlı Pencere Araması
-                    win_params = {"Name": selector["WindowName"], "ControlTypeName": "WindowControl"}
-                    if selector.get("WindowClassName"): win_params["ClassName"] = selector["WindowClassName"]
-                    
-                    # Pencereyi bulmaya çalış
-                    window_candidate = root.WindowControl(Name=selector["WindowName"], searchDepth=1)
-                    if not window_candidate.Exists(0.1):
-                        pass 
-                    else:
-                        current_root = window_candidate
+                        # A. Derin Arama (Bu düğüm yer değiştirmiş olabilir)
+                        criteria = self._create_node_criteria(target_node)
+                        # Sadece "Type" ile derin arama yapmak çok tehlikeli (çok sonuç döner), 
+                        # en azından Name veya ID varsa derin arayalım.
+                        if criteria.get("Name") or criteria.get("AutomationId"):
+                            found_child = current_node.Control(searchDepth=3, **criteria)
+                            if not found_child.Exists(0.05): found_child = None
                         
-                # Birincil Arama (Katı) - Artık muhtemelen 'current_root' kapsamında
-                if len(criteria) > 0:
-                    # Gürültü Filtreleme: ClassName CSS sınıfları içeriyorsa katı aramada sorun çıkarabilir.
-                    # Şimdilik katı aramayı KATI tutalım, aşağıda esnek fallback var.
-                    
-                    if target_index > 1:
-                        matches = []
-                        for ctrl, _ in auto.WalkControl(current_root, maxDepth=search_depth):
-                            if self._matches_criteria(ctrl, criteria):
-                                matches.append(ctrl)
-                                if len(matches) >= target_index:
-                                    break
-                        if len(matches) >= target_index:
-                            candidate = matches[target_index - 1]
+                        # B. Skip Level (Aradaki kutu kalkmış olabilir, bir sonraki adıma bakalım!)
+                        if not found_child and i + 1 < len(ui_path):
+                            next_node = ui_path[i+1]
+                            self.logger.info(f"Düğüm atlanıyor, bir sonrakine bakılıyor: {next_node.get('Name')}")
+                            next_criteria = self._create_node_criteria(next_node)
+                            if next_criteria.get("Name") or next_criteria.get("AutomationId"):
+                                found_next = current_node.Control(searchDepth=4, **next_criteria)
+                                if found_next.Exists(0.05):
+                                    found_child = found_next
+                                    # Döngüdeki 'i' indeksini manüel atlayamayız ama 'current_node'u güncelledik.
+                                    # Bir sonraki iterasyonda normal akış devam edecek ama biz şimdi
+                                    # 'found_child'ı (aslında next_node'u) bulduğumuz için
+                                    # bu adımı "başarılı" sayıp, bir sonraki adımı (i+1) es geçmemiz lazım.
+                                    # Ancak for döngüsü i'yi artıracak.
+                                    # Bu yüzden burada trick yapıyoruz:
+                                    # current_node zaten next_node oldu.
+                                    # Bir sonraki iterasyonda i+1 aranacak, ama biz zaten oradayız!
+                                    # Sorun yok, çünkü i+1'in çocuklarını arayacağız.
+                                    # HATA: Hayır, i+1'i aradık ve bulduk. Şimdi current_node = i+1.
+                                    # Bir sonraki turda loop i+1 elemanını arayacak. Ama biz zaten i+1'deyiz!
+                                    # Bizim loop'un i+2'den devam etmesi lazım.
+                                    # Python'da for döngüsüne müdahale edemeyiz.
+                                    # O yüzden burada basitçe: current_node'u bulduğumuz next_node yapıyoruz.
+                                    # Ve loop'un bir sonraki adımında (i+1) bu node'un *içinde* i+1'i arayacak.
+                                    # Ama i+1 zaten bu node! Kendi içinde kendini bulamaz.
+                                    # ÇÖZÜM: Path Broken verip çıkmak yerine,
+                                    # Son çare "Target Rescue"ya güvenmek daha iyidir.
+                                    pass
+
+                    if found_child:
+                        current_node = found_child
                     else:
-                        # İndeks 1 için Hızlı Yol
-                        candidate = current_root.Control(**criteria, searchDepth=search_depth)
+                        path_broken = True
+                        self.logger.warning(f"Yol koptu! Bulunamayan: {target_node.get('Name')}")
+                        break
                 
-                # Geri Çekilme Stratejileri (v120: Sağlamlık)
-                if not candidate or not candidate.Exists(0.1):
-                    # Strateji 1: ClassName'i Yoksay (Eğer kullanıldıysa)
-                    if "ClassName" in criteria:
-                        relaxed = criteria.copy()
-                        del relaxed["ClassName"]
-                        self.logger.info("Fallback 1: ClassName yoksayılıyor...")
-                        candidate = current_root.Control(**relaxed, searchDepth=search_depth)
-
-                if not candidate or not candidate.Exists(0.1):
-                    # Strateji 2: Bulanık İsim Eşleşmesi (İçerir / Contains)
-                    if "Name" in criteria and len(criteria["Name"]) > 5:
-                         partial_name = criteria["Name"][:20] # İlk 20 karakter
-                         self.logger.info(f"Fallback 2: Bulanık İsim Araması ('{partial_name}')...")
-                         
-                         for ctrl, _ in auto.WalkControl(current_root, maxDepth=1): 
-                             
-                             if "ControlType" in criteria and ctrl.ControlTypeId != criteria["ControlType"]:
-                                 continue
-                                 
-                             # İsim İçeriyor mu?
-                             if partial_name in ctrl.Name:
-                                 candidate = ctrl
-                                 break
-                                 
-                if not candidate or not candidate.Exists(0.1):
-                    # Strateji 3: AutomationId'ye Güven (UiPath Tarzı: ID Kraldır 👑)
-                    # İsim değişmiş olabilir ama ID sabit kalabilir.
-                    if "AutomationId" in criteria:
-                         trust_id_criteria = {"AutomationId": criteria["AutomationId"]}
-                         if "ControlType" in criteria:
-                             trust_id_criteria["ControlType"] = criteria["ControlType"]
-                             
-                         self.logger.info("Fallback 3: AutomationId'ye güveniliyor (İsim yoksayılıyor)...")
-                         candidate = current_root.Control(**trust_id_criteria, searchDepth=search_depth)
-
-                if not candidate or not candidate.Exists(0.1):
-                     # Strateji 4: AutomationId'yi Yoksay, İsme Güven (Son Çare)
-                     if target_index == 1 and "AutomationId" in criteria and "Name" in criteria:
-                          relaxed = criteria.copy()
-                          del relaxed["AutomationId"]
-                          self.logger.info("Fallback 4: AutomationId yoksayılıyor, İsme güveniliyor...")
-                          candidate = current_root.Control(**relaxed, searchDepth=search_depth)
-
-                # Otomatik Ebeveyn Doğrulama (v95) 🛡️
-                # Eğer ebeveyn bilgisi varsa, yanlış pozitifleri elemeli (örn: li vs h1)
-                if candidate and candidate.Exists(0.1):
-                    parent_type = selector.get("ParentControlType")
-                    parent_name = selector.get("ParentName")
+                if not path_broken:
+                    self.logger.info("🎯 Element UI Yolu ile bulundu!")
+                    return current_node
+                
+                # 4. Target Rescue (Son Çare)
+                # Yol koptuysa bile, belki son hedef (Target) hala "Window" içinde bir yerlerdedir?
+                if path_broken:
+                    self.logger.info("Yol koptu, Hedef Kurtarma (Target Rescue) devreye giriyor...")
+                    target_node = ui_path[-1] # En son eleman
+                    target_criteria = self._create_node_criteria(target_node)
                     
-                    if parent_type or parent_name:
+                    # Kurtarma 1: Scoped Rescue (En son kaldığımız yerin içinde ara)
+                    # Bu, Global aramadan çok daha güvenlidir çünkü bağlamı korur.
+                    if current_node:
+                        self.logger.info(f"Kurtarma 1 (Scoped): {current_node.Name} içinde aranıyor...")
                         try:
-                            cand_parent = candidate.GetParent()
-                            if cand_parent:
-                                if parent_type and cand_parent.ControlTypeName != parent_type:
-                                    self.logger.warning(f"Ebeveyn Uyuşmazlığı! Beklenen Tip: {parent_type}, Alınan: {cand_parent.ControlTypeName}. Reddediliyor.")
-                                    candidate = None # Reddet
-                                elif parent_name and cand_parent.Name != parent_name:
-                                     # İsim kontrolü esnek olabilir, şimdilik sadece uyar.
-                                     pass
-                        except:
-                            pass # Ebeveyn alınamadı, güvenli varsay?
+                            # Derinlemesine ara
+                            rescue_element = current_node.Control(searchDepth=0xFFFFFFFF, **target_criteria)
+                            if rescue_element.Exists(0.1):
+                                self.logger.info("🚑 Scoped Rescue Başarılı! Element bulundu.")
+                                return rescue_element
+                        except: pass
 
-                if candidate and candidate.Exists(0.1):
-                    return candidate
+                    # Kurtarma 2: Global Rescue (Pencere genelinde ara)
+                    # DİKKAT: Bu çok tehlikeli olabilir. Sadece İsim veya ID varsa izin ver.
+                    # Sadece "Button" tipiyle tüm pencereyi ararsak yanlış butona tıklarız.
+                    if target_criteria.get("Name") or target_criteria.get("AutomationId"):
+                        self.logger.info("Kurtarma 2 (Global): Pencere genelinde aranıyor...")
+                        rescue_element = found_window.Control(searchDepth=0xFFFFFFFF, **target_criteria)
+                        if rescue_element.Exists(0.1):
+                            self.logger.info("🚑 Global Rescue Başarılı! Element bulundu.")
+                            return rescue_element
+                    else:
+                        self.logger.warning("Global Rescue iptal edildi: Hedef kriterleri çok belirsiz (İsim/ID yok).")
 
-            except Exception:
-                pass
+            except Exception as e:
+                self.logger.warning(f"Akıllı arama hatası: {e}")
             
             time.sleep(0.5)
-            
+
+        return None
+    
+    def _find_window_robust(self, win_node):
+        """Pencereyi bulmak için çok katmanlı, sağlam arama."""
+        # 1. Process ID (En Kesin) - Eğer process hala aynıysa
+        # (Bu kısım şu an pasif, çünkü PID her restartta değişir. 
+        # Ancak uygulamanın o anki PID'sini biliyorsak kullanılabilir)
+        
+        # 2. İsim ve Class ile "Fuzzy" Arama
+        return self._find_window_scope(win_node.get("Name"), win_node.get("Class"))
+
+    def _create_node_criteria(self, node):
+        """Node sözlüğünden arama kriteri üretir."""
+        c = {}
+        if node.get("Name"): c["Name"] = node["Name"]
+        if node.get("Id"): c["AutomationId"] = node["Id"]
+        if node.get("Class"): c["ClassName"] = node["Class"]
+        t = self._get_control_type_id(node.get("Type"))
+        if t: c["ControlType"] = t
+        return c
+
+    def _verify_node_match(self, control, node, loose=False):
+        """Bulunan elementin node bilgileriyle uyuşup uyuşmadığını doğrular."""
+        try:
+            if not loose:
+                # Sıkı kontrol
+                if node.get("Id") and control.AutomationId != node["Id"]: return False
+                if node.get("Name") and control.Name != node["Name"]: return False
+            else:
+                # Gevşek kontrol (İndeks doğrulaması için)
+                # Türü kesin tutmalı
+                t = self._get_control_type_id(node.get("Type"))
+                if t and control.ControlTypeId != t: return False
+                
+                # İsim veya ID'den en az biri 'benziyorsa' tamamdır.
+                match = False
+                if node.get("Id") and node["Id"] == control.AutomationId: match = True
+                if node.get("Name") and node["Name"] in control.Name: match = True
+                # Hiçbir özellik yoksa (sadece Type varsa), Type tuttuğu için kabul et.
+                if not node.get("Id") and not node.get("Name"): match = True
+                
+                return match
+        except: return False
+        return True
+
+    def _find_element_classic(self, selector, timeout):
+        """Eski usül arama (Geri uyumluluk için)."""
+        start_time = time.time()
+        # 1. Kriterler
+        base_criteria = {}
+        if selector.get("ControlName"): base_criteria["Name"] = selector["ControlName"]
+        if selector.get("ClassName"): base_criteria["ClassName"] = selector["ClassName"]
+        type_id = self._get_control_type_id(selector.get("ControlType"))
+        if type_id: base_criteria["ControlType"] = type_id
+
+        while time.time() - start_time < timeout:
+            if self.stop_check_callback and self.stop_check_callback(): return None
+            try:
+                # Kapsam: Window veya Root
+                search_scope = auto.GetRootControl()
+                if selector.get("WindowName"):
+                    win = self._find_window_scope(selector["WindowName"], selector.get("WindowClassName"))
+                    if win: search_scope = win
+
+                # A. Strict (ID)
+                if selector.get("AutomationId"):
+                    strict = base_criteria.copy()
+                    strict["AutomationId"] = selector["AutomationId"]
+                    try:
+                        found = search_scope.Control(searchDepth=0xFFFFFFFF, **strict)
+                        if found.Exists(0.1): return found
+                    except: pass
+                
+                # B. Relaxed (Name/Type) - First Match
+                for ctrl, _ in auto.WalkControl(search_scope, maxDepth=0xFFFFFFFF):
+                    if self._matches_criteria(ctrl, base_criteria):
+                        return ctrl
+                    if self.stop_check_callback and self.stop_check_callback(): return None
+            except: pass
+            time.sleep(0.5)
         return None
 
     def click_element(self, selector: dict, button='left'):

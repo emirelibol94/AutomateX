@@ -13,11 +13,13 @@ class AutomationRunner:
         self.driver = driver
         self.db = db
         # v73: Inject stop callback to driver if supported
+        # v167.47: Inject stop callback to StructureDriver too
+        stop_lambda = lambda: self.stop_requested
         if hasattr(self.driver, 'stop_check_callback'):
-            self.driver.stop_check_callback = lambda: self.stop_requested
+            self.driver.stop_check_callback = stop_lambda
         
-        # v80: Structure Driver (Selectors)
-        self.structure_driver = StructureDriver()
+        # v80: Structure Driver (Selectors) with Stop Support
+        self.structure_driver = StructureDriver(stop_check_callback=stop_lambda)
             
         self.logger = logging.getLogger("Runner")
         self.is_running = False
@@ -68,7 +70,8 @@ class AutomationRunner:
                     if act.type == "LAUNCH_APP":
                         path = act.params.get("path")
                         if path:
-                            app_name = os.path.basename(path).split('.')[0].lower()
+                            # v167.39: Fix - Auto-Focus için tam adı kullan (Process Match için .exe uzantısı şart)
+                            app_name = os.path.basename(path)
                             self.logger.info(f"Hedef uygulama bulundu (Adım {i+1}): {app_name}")
                             # Sadece öne getirmeyi dene (Driver'da var olan logic)
                             # DesktopDriver olup olmadığını kontrol etsek iyi olur ama base driver'da yoksa patlamasın
