@@ -187,16 +187,16 @@ class DesktopDriver(BaseDriver):
             if confidence is not None:
                 current_confidence = confidence
             else:
-                # Zamanla düşen güven eşiği
+                # Zamanla düşen güven eşiği (Artık %95'ten başlıyor)
                 elapsed = time.time() - start_time
-                current_confidence = max(0.65, 0.85 - (elapsed / timeout) * 0.20)
+                current_confidence = max(0.75, 0.95 - (elapsed / timeout) * 0.20)
             
-            # KATMAN 1: MUTLAK GÖRÜŞ (OpenCV)
+            # KATMAN 1: MUTLAK GÖRÜŞ (OpenCV - Renkli ve 1:1 Ölçek Tercihli)
             if self.has_opencv:
                 coords = self._find_image_opencv(target, threshold=current_confidence, match_index=match_index, click_offset=click_offset)
                 if coords: return coords
             
-            # KATMAN 2: ŞEKİL EŞLEŞTİRME (Rengi Yoksay) - Sadece OpenCV varsa ve normal eşleşme başarısızsa
+            # KATMAN 2: ŞEKİL EŞLEŞTİRME (Rengi Yoksayarak Siyah/Beyaz Arama)
             if self.has_opencv:
                 coords = self._find_image_opencv(target, threshold=max(0.6, current_confidence - 0.1), ignore_color=True, match_index=match_index, click_offset=click_offset)
                 if coords: return coords
@@ -267,7 +267,7 @@ class DesktopDriver(BaseDriver):
             screen_img = np.array(pyautogui.screenshot())
             screen_bgr = cv2.cvtColor(screen_img, cv2.COLOR_RGB2BGR)
             screen_gray = cv2.cvtColor(screen_bgr, cv2.COLOR_BGR2GRAY)
-            screen_gray = cv2.GaussianBlur(screen_gray, (3, 3), 0)
+            # Blur kaldırıldı
             
             template_bgr = None # Şablon başlat
             # FAZ 0: DB ARAMASI (v66: Birincil Kaynak)
@@ -292,137 +292,165 @@ class DesktopDriver(BaseDriver):
             if template_bgr is None: return None
             
             template_gray = cv2.cvtColor(template_bgr, cv2.COLOR_BGR2GRAY)
-            template_gray = cv2.GaussianBlur(template_gray, (3, 3), 0)
+            # Blur kaldırıldı
             
-            h, w = template_gray.shape[:2]
-            scales = np.linspace(0.7, 1.3, 7) # Performans için ölçek sayısını biraz azalttık v63
+            # GÜNCELLEME: Siyah-Beyaz zorlamasını kaldır, gerekirse Renkli (BGR) ara
+            if ignore_color:
+                match_screen = screen_gray
+                match_template = template_gray
+            else:
+                match_screen = screen_bgr
+                match_template = template_bgr
             
+            # FAZ 1: YAPAY ZEKA (Keypoint Matching - SIFT) - "Akıllı Göz" 🧠
+            # Kullanıcı talebi: Ana yöntem olarak her zaman Keypoint Matching çalışsın.
             all_matches = [] # (val, loc, scale, rw, rh)
             
-            # FAZ 1: STANDART ÇOKLU-ÖLÇEKLİ ŞABLON EŞLEŞTİRME
-            # (Hızlı ve Kesin - %100 Renk ve Şekil Uyumu)
-            found_matches = []
-            best_scale_score = -1
-            best_scale = 1.0
-            best_rw, best_rh = 0, 0
-            
-            # Adım 1: En iyi ölçeği bul
-            for scale in scales:
-                rw, rh = int(w * scale), int(h * scale)
-                if rw < 10 or rh < 10: continue
-                
-                resized_gray = cv2.resize(template_gray, (rw, rh))
-                res = cv2.matchTemplate(screen_gray, resized_gray, cv2.TM_CCOEFF_NORMED)
-                _, max_val, _, _ = cv2.minMaxLoc(res)
-                
-                if max_val > best_scale_score:
-                    best_scale_score = max_val
-                    best_scale = scale
-                    best_rw, best_rh = rw, rh
-
-            # Adım 2: Belirlenen ölçekte TÜM eşleşmeleri bul (Multi-Instance)
-            if best_scale_score >= threshold:
-                rw, rh = best_rw, best_rh
-                resized_gray = cv2.resize(template_gray, (rw, rh))
-                res = cv2.matchTemplate(screen_gray, resized_gray, cv2.TM_CCOEFF_NORMED)
-                
-                while True:
-                    min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(res)
-                    
-                    if max_val < threshold:
-                        break
-                        
-                    # Eşleşmeyi kaydet: (score, (x,y), scale, w, h)
-                    found_matches.append((max_val, max_loc, best_scale, rw, rh))
-                    
-                    # Bulunan alanı maskele (Tekrar bulmasın diye)
-                    # Maskeleme: Bulunan noktanın etrafını -1 yap
-                    # Dikkat: Grid yapıda yan yana olabilir, çok büyük maskeleme yapma.
-                    # Yarım boyutta maskeleme genellikle güvenlidir.
-                    mx, my = max_loc
-                    cv2.rectangle(res, (mx - rw//2, my - rh//2), (mx + rw//2, my + rh//2), -1, -1)
-
-            if found_matches:
-                # v160: Uzamsal Sıralama (Grid Sort)
-                # Önce Y (Satır), sonra X (Sütun) değerine göre sırala
-                # Tolerans: Satırlar arası küçük piksel farklarını yok say (örn: 10px)
-                def sort_key(match):
-                    score, (x, y), s, w, h = match
-                    return (int(y // 10) * 10, x)
-                
-                found_matches.sort(key=sort_key)
-                
-                self.logger.info(f"Vision: Toplam {len(found_matches)} eşleşme bulundu. İstenen İndeks: {match_index}")
-                
-                if 0 <= match_index < len(found_matches):
-                    # İstenen indeksteki eşleşmeyi seç
-                    # all_matches listesine ekleyip aşağıdaki akışa bırakıyoruz
-                    target_match = found_matches[match_index]
-                    self.logger.info(f"Vision: İndeks {match_index} seçildi (Skor: %{int(target_match[0]*100)})")
-                    all_matches.append(target_match)
-                else:
-                    self.logger.warning(f"Vision: İstenen indeks ({match_index}) bulunanların dışında (Toplam: {len(found_matches)}). En iyi eşleşme (0) kullanılıyor.")
-                    all_matches.append(found_matches[0]) 
-
-            # FAZ 2: ANAHTAR NOKTA EŞLEŞTİRME (SIFT/ORB) - "Akıllı Göz" 🧠
-            # Eğer standart arama başarısızsa veya düşük skorluysa devreye girer.
-            # Renk değişimlerine, hafif bozulmalara ve dönmelere karşı dayanıklıdır.
-            elif self.has_opencv:
+            if self.has_opencv:
                 try:
-                    self.logger.info("Vision: Standart arama yetersiz, Yapay Zeka (Keypoint Matching) devreye giriyor...")
+                    self.logger.info("Vision: Yapay Zeka (SIFT Keypoint Matching) ile aranıyor...")
+                    # 1. ORB yerine SIFT (Daha hassas, ölçek/dönüşüm bağımsız, patent kısıtlaması kalktı)
+                    sift = cv2.SIFT_create()
+                    kp1, des1 = sift.detectAndCompute(template_gray, None)
+                    kp2, des2 = sift.detectAndCompute(screen_gray, None)
                     
-                    # ORB dedektörünü başlat (Hızlı ve etkili)
-                    orb = cv2.ORB_create(nfeatures=1000)
-                    
-                    # Anahtar noktaları ve tanımlayıcıları bul
-                    kp1, des1 = orb.detectAndCompute(template_gray, None)
-                    kp2, des2 = orb.detectAndCompute(screen_gray, None)
-                    
-                    if des1 is not None and des2 is not None and len(des1) > 5 and len(des2) > 5:
-                        # Eşleştirici (Hamming mesafeli BFMatcher)
-                        bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
-                        matches = bf.match(des1, des2)
+                    if des1 is not None and des2 is not None and len(des1) > 4 and len(des2) > 4:
+                        # FLANN veya BFMatcher (SIFT için NORM_L2)
+                        bf = cv2.BFMatcher(cv2.NORM_L2)
+                        matches = bf.knnMatch(des1, des2, k=2)
                         
-                        # Mesafeye göre sırala (En iyi eşleşmeler önce)
-                        matches = sorted(matches, key=lambda x: x.distance)
+                        # 2. Lowe's Ratio Test (Kesinlik Filtresi - Halüsinasyonları Engeller)
+                        # Sadece "açık ara" en iyi olan, rakiplerinden %30 daha iyi eşleşmeleri al.
+                        good_matches = []
+                        for m_n in matches:
+                            if len(m_n) == 2:
+                                m, n = m_n
+                                if m.distance < 0.7 * n.distance:
+                                    good_matches.append(m)
                         
-                        # İlk N eşleşmeyi al
-                        good_matches = matches[:20] # En iyi 20 nokta
-                        
-                        if len(good_matches) >= 5: # En az 5 nokta tutmalı
-                            # İyi eşleşmelerin konumunu çıkar
-                            src_pts = np.float32([kp1[m.queryIdx].pt for m in good_matches]).reshape(-1, 1, 2)
-                            dst_pts = np.float32([kp2[m.trainIdx].pt for m in good_matches]).reshape(-1, 1, 2)
+                        if len(good_matches) >= 4: # En az 4 güvenilir nokta (Homografi için şart)
+                            # 3. Kümeleme (Clustering) - Çoklu hedefler için basit mesafe tabanlı gruplama
+                            # Aynı ekranda birden fazla aynı butondan varsa RANSAC şaşırır. Bunları kümelere ayırıyoruz.
+                            h_t, w_t = template_gray.shape
+                            cluster_threshold = max(h_t, w_t) * 1.5 # Şablon boyutunun 1.5 katı mesafedekiler aynı gruptur
                             
-                            # Homografi Bul (Perspektif dönüşümü)
-                            M, mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
+                            clusters = []
+                            for m in good_matches:
+                                pt = np.array(kp2[m.trainIdx].pt)
+                                matched_cluster = False
+                                for cluster in clusters:
+                                    # Kümeye ait noktaların ortalaması ile mesafe kontrolü
+                                    center = np.mean([p for _, p in cluster], axis=0)
+                                    if np.linalg.norm(pt - center) < cluster_threshold:
+                                        cluster.append((m, pt))
+                                        matched_cluster = True
+                                        break
+                                if not matched_cluster:
+                                    clusters.append([(m, pt)])
                             
-                            if M is not None:
-                                # Şablon boyutlarını al
-                                h, w = template_gray.shape
-                                pts = np.float32([[0, 0], [0, h - 1], [w - 1, h - 1], [w - 1, 0]]).reshape(-1, 1, 2)
+                            valid_clusters = []
+                            for cluster in clusters:
+                                if len(cluster) >= 4: # RANSAC için minimum 4 nokta
+                                    c_matches = [m_item for m_item, _ in cluster]
+                                    src_pts = np.float32([kp1[m_item.queryIdx].pt for m_item in c_matches]).reshape(-1, 1, 2)
+                                    dst_pts = np.float32([p for _, p in cluster]).reshape(-1, 1, 2)
+                                    
+                                    M, mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
+                                    if M is not None:
+                                        pts = np.float32([[0, 0], [0, h_t - 1], [w_t - 1, h_t - 1], [w_t - 1, 0]]).reshape(-1, 1, 2)
+                                        dst = cv2.perspectiveTransform(pts, M)
+                                        
+                                        x_min = int(np.min(dst[:, 0, 0]))
+                                        y_min = int(np.min(dst[:, 0, 1]))
+                                        x_max = int(np.max(dst[:, 0, 0]))
+                                        y_max = int(np.max(dst[:, 0, 1]))
+                                        box_w = x_max - x_min
+                                        box_h = y_max - y_min
+                                        
+                                        # Şekil anormallik kontrolü (Çok küçük veya çok büyük hatalı alanları ele)
+                                        if 0.5 * w_t < box_w < 2.0 * w_t and 0.5 * h_t < box_h < 2.0 * h_t:
+                                            valid_clusters.append({
+                                                "score": len(c_matches), 
+                                                "match": (0.95, (x_min, y_min), 1.0, box_w, box_h),
+                                                "loc": (x_min, y_min)
+                                            })
+                            
+                            if valid_clusters:
+                                # Uzamsal (Grid) Sıralama: Önce Y, sonra X ekseninde butonları sırala
+                                def sort_key(c):
+                                    x, y = c["loc"]
+                                    return (int(y // 10) * 10, x)
+                                    
+                                valid_clusters.sort(key=sort_key)
                                 
-                                # Ekran koordinatlarına dönüştür
-                                dst = cv2.perspectiveTransform(pts, M)
+                                self.logger.info(f"Vision AI: {len(valid_clusters)} benzersiz eşleşme bulundu. İstenen İndeks: {match_index}")
                                 
-                                # Sınırlayıcı Kutuyu (Bounding Box) al
-                                x_min = int(np.min(dst[:, 0, 0]))
-                                y_min = int(np.min(dst[:, 0, 1]))
-                                x_max = int(np.max(dst[:, 0, 0]))
-                                y_max = int(np.max(dst[:, 0, 1]))
-                                
-                                # Doğrulama: Boyut kontrolü (Aşırı büyük/küçük olmamalı)
-                                box_w = x_max - x_min
-                                box_h = y_max - y_min
-                                
-                                if 0.5 * w < box_w < 2.0 * w and 0.5 * h < box_h < 2.0 * h:
-                                    self.logger.info(f"Vision AI: Nesne şekil özellikleri ile bulundu! (Keypoints: {len(good_matches)})")
-                                    # Format: (Val, Loc(x,y), Scale, W, H)
-                                    # RANSAC geçtiyse Keypoint skoru genellikle güvenilirdir (1.0)
-                                    all_matches.append((0.95, (x_min, y_min), 1.0, box_w, box_h))
-                    
+                                if 0 <= match_index < len(valid_clusters):
+                                    target_cluster = valid_clusters[match_index]
+                                    self.logger.info(f"Vision AI: İndeks {match_index} seçildi (Keypoints: {target_cluster['score']})")
+                                    all_matches.append(target_cluster["match"])
+                                else:
+                                    self.logger.warning(f"Vision AI: İstenen indeks ({match_index}) bulunanların dışında. En iyi eşleşme (0) kullanılıyor.")
+                                    all_matches.append(valid_clusters[0]["match"])
                 except Exception as e:
                     self.logger.warning(f"Keypoint Eşleştirme Hatası: {e}")
+
+            # FAZ 2: STANDART EŞLEŞTİRME (Sessiz Yedek Yöntem)
+            # Eğer Yapay Zeka nesneyi bulamazsa (örn: "dsg" gibi düz, pürüzsüz ve keypoint barındırmayan
+            # basit butonlar), sistem hemen standart eşleştirmeyi devreye sokarak eksikliği kapatır.
+            if not all_matches:
+                found_matches = []
+                h_sm, w_sm = match_template.shape[:2]
+                res = cv2.matchTemplate(match_screen, match_template, cv2.TM_CCOEFF_NORMED)
+                _, max_val, _, _ = cv2.minMaxLoc(res)
+                
+                if max_val >= threshold:
+                    while True:
+                        min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(res)
+                        if max_val < threshold: break
+                        found_matches.append((max_val, max_loc, 1.0, w_sm, h_sm))
+                        mx, my = max_loc
+                        cv2.rectangle(res, (mx - w_sm//2, my - h_sm//2), (mx + w_sm//2, my + h_sm//2), -1, -1)
+                else:
+                    best_scale_score = -1
+                    best_scale = 1.0
+                    best_rw, best_rh = 0, 0
+                    scales = np.linspace(0.8, 1.2, 10)
+                    for scale in scales:
+                        if abs(scale - 1.0) < 0.01: continue
+                        rw, rh = int(w_sm * scale), int(h_sm * scale)
+                        if rw < 10 or rh < 10: continue
+                        resized_template = cv2.resize(match_template, (rw, rh))
+                        res_scale = cv2.matchTemplate(match_screen, resized_template, cv2.TM_CCOEFF_NORMED)
+                        _, max_val_scale, _, _ = cv2.minMaxLoc(res_scale)
+                        if max_val_scale > best_scale_score:
+                            best_scale_score = max_val_scale
+                            best_scale = scale
+                            best_rw, best_rh = rw, rh
+
+                    if best_scale_score >= threshold:
+                        rw, rh = best_rw, best_rh
+                        resized_template = cv2.resize(match_template, (rw, rh))
+                        res_scale = cv2.matchTemplate(match_screen, resized_template, cv2.TM_CCOEFF_NORMED)
+                        while True:
+                            min_val, max_val_scale, min_loc, max_loc = cv2.minMaxLoc(res_scale)
+                            if max_val_scale < threshold: break
+                            found_matches.append((max_val_scale, max_loc, best_scale, rw, rh))
+                            mx, my = max_loc
+                            cv2.rectangle(res_scale, (mx - rw//2, my - rh//2), (mx + rw//2, my + rh//2), -1, -1)
+
+                if found_matches:
+                    def sort_key(match):
+                        score, (x, y), s, w, h = match
+                        return (int(y // 10) * 10, x)
+                    found_matches.sort(key=sort_key)
+                    
+                    if 0 <= match_index < len(found_matches):
+                        target_match = found_matches[match_index]
+                        self.logger.info(f"Vision Fallback (Standart): İndeks {match_index} seçildi (Skor: %{int(target_match[0]*100)})")
+                        all_matches.append(target_match)
+                    else:
+                        all_matches.append(found_matches[0])
 
             if not all_matches:
                 self.logger.debug(f"Vision Teşhis: Hiç eşleşme bulunamadı (Eşik: %{int(threshold*100)}).")
@@ -500,96 +528,34 @@ class DesktopDriver(BaseDriver):
             self.logger.error(f"Yazma hatası: {e}")
             return False
 
-
-    def get_text(self, selector: str) -> str:
-        """
-        v167.24: Belirtilen seçiciden metin okur.
-        Selector formatı: {'type': 'uia', 'title': '...', 'control_type': '...'} veya string.
-        """
+    def press_key(self, key: str) -> bool:
+        self.logger.info(f"Tuşa basılıyor: {key}")
         try:
-            self.logger.info(f"Metin okunuyor: {selector}")
-            import json
-            import uiautomation as auto
-            
-            sel_dict = {}
-            if isinstance(selector, dict):
-                sel_dict = selector
-            elif isinstance(selector, str):
-                try: sel_dict = json.loads(selector)
-                except: sel_dict = {"title": selector} # Basit string ise title kabul et
-                
-            # UIA ile eleman bulma
-            # Varsayılan olarak Root'tan başla
-            root = auto.GetRootControl()
-            search_depth = sel_dict.get("depth", 0xFFFFFFFF)
-            
-            # Parametreleri hazırla (v167.29: Mapping Improved)
-            kwargs = {}
-            # Name Mapping
-            if "title" in sel_dict: kwargs["Name"] = sel_dict["title"]
-            elif "Name" in sel_dict: kwargs["Name"] = sel_dict["Name"]
-            elif "ControlName" in sel_dict: kwargs["Name"] = sel_dict["ControlName"]
-            
-            # AutomationId Mapping
-            if "automation_id" in sel_dict: kwargs["AutomationId"] = sel_dict["automation_id"]
-            elif "AutomationId" in sel_dict: kwargs["AutomationId"] = sel_dict["AutomationId"]
-            
-            # ClassName Mapping
-            if "class_name" in sel_dict: kwargs["ClassName"] = sel_dict["class_name"]
-            elif "ClassName" in sel_dict: kwargs["ClassName"] = sel_dict["ClassName"]
-            
-            # ControlType Mapping
-            if "control_type" in sel_dict: 
-                try: kwargs["ControlType"] = getattr(auto.ControlType, sel_dict["control_type"])
-                except: pass
-            elif "ControlType" in sel_dict:
-                 try: kwargs["ControlType"] = getattr(auto.ControlType, sel_dict["ControlType"])
-                 except: pass
-
-            self.logger.debug(f"UIA Search Params: {kwargs}")
-                
-            found_control = None
-            if kwargs:
-                # v167.30: GetFirstChildControl yerine doğrudan Control tanımla ve arat
-                # v167.31: Exists(maxSearchSeconds, searchInterval) positional usage
-                candidate = auto.Control(**kwargs)
-                if candidate.Exists(3, 0.1): 
-                    found_control = candidate
-                else:
-                    found_control = None
-            
-            if found_control:
-                # Metin alma stratejileri: ValuePattern > Name > Validation
-                # 1. Value Pattern (Input alanları için)
-                try: 
-                    pattern = found_control.GetValuePattern()
-                    if pattern:
-                        val = pattern.Value
-                        self.logger.info(f"Metin okundu (Value): {val}")
-                        return val
-                except: pass
-                
-                # 2. Text Pattern (Dökümanlar için)
-                try:
-                    pattern = found_control.GetTextPattern()
-                    if pattern:
-                        val = pattern.DocumentRange.GetText(-1)
-                        self.logger.info(f"Metin okundu (TextPattern): {val}")
-                        return val
-                except: pass
-
-                # 3. Name (Label, Button vb. için)
-                name = found_control.Name
-                self.logger.info(f"Metin okundu (Name): {name}")
-                return name
-                
-            self.logger.warning("Eleman bulunamadı, boş metin dönülüyor.")
-            return ""
-            
+            pyautogui.press(key)
+            return True
         except Exception as e:
-            self.logger.error(f"Metin okuma hatası: {e}")
-            return ""
-        except: return False
+            self.logger.error(f"Tuşa basılamadı: {e}")
+            return False
+
+    def hotkey(self, keys: list) -> bool:
+        self.logger.info(f"Hotkey basılıyor: {' + '.join(keys)}")
+        try:
+            pyautogui.hotkey(*keys)
+            return True
+        except Exception as e:
+            self.logger.error(f"Hotkey hatası: {e}")
+            return False
+
+    def multi_press(self, key: str, count: int) -> bool:
+        self.logger.info(f"Çoklu tuş basılıyor: {key} ({count}x)")
+        try:
+            pyautogui.press(key, presses=count)
+            return True
+        except Exception as e:
+            self.logger.error(f"Çoklu tuş hatası: {e}")
+            return False
+
+
 
     def wait(self, seconds: float):
         self.logger.info(f"Bekleniyor: {seconds} sn")
@@ -654,49 +620,72 @@ class DesktopDriver(BaseDriver):
             return True
         except: return False
 
+    def kill_process(self, app_name: str) -> bool:
+        """Kapatılmak istenen uygulamanın işlemini sonlandırır."""
+        try:
+            self.logger.info(f"İşlem kapatılıyor: {app_name}")
+            # Ensure ending with .exe
+            if not app_name.lower().endswith(".exe"):
+                app_name += ".exe"
+            # Windows command to forcefully kill process
+            import subprocess
+            CREATE_NO_WINDOW = 0x08000000
+            result = subprocess.run(
+                ["taskkill", "/f", "/im", app_name],
+                creationflags=CREATE_NO_WINDOW,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+            # returncode returns 0 on success
+            return result.returncode == 0
+        except Exception as e:
+            self.logger.error(f"Uygulama kapatılamadı ({app_name}): {e}")
+            return False
+
     def scroll(self, amount: int) -> bool:
         try:
+            self.logger.info(f"Fare tekerleği ile kaydırılıyor: {amount}")
             pyautogui.scroll(amount)
             return True
         except: return False
 
-    def scroll_until_found(self, target: str, direction: str = "down", step: int = 500, max_steps: int = 10, timeout: int = 10, match_index: int = 0, click_offset: tuple = (0, 0)) -> bool:
+    def scroll_until_found(self, target: str, direction: str = "down", step: int = 1000, max_steps: int = 10, timeout: int = 10, match_index: int = 0, click_offset: tuple = (0, 0)) -> bool:
         """Belirtilen görseli bulana kadar kaydırır (Akıllı Kaydırma / Smart Scroll)."""
         self.logger.info(f"Akıllı Kaydırma Başladı: {direction} yönüne, hedef: {os.path.basename(target)}")
         
         # Yön belirle (PyAutoGUI: Pozitif = Yukarı, Negatif = Aşağı)
         scroll_amount = -step if direction == "down" else step
         
-        # v57: Fareyi ortaya çek (Hover efektini önle ve odakla)
+        # Fareyi ortaya çek (Hover efektini önle)
         sw, sh = pyautogui.size()
         pyautogui.moveTo(sw//2, sh//2)
         
         for i in range(max_steps):
-            # 1. Görseli ARA (Unified Engine)
-            # v58: "Click ile aynı motoru kullan" isteği üzerine.
-            # wait_for_element ile tüm katmanları (OpenCV, Shape, Fallback) 0.8sn boyunca dener.
+            # 1. Görseli ARA (Tıklama ile birebir aynı güvenlikte)
             self.logger.info(f"Akıllı Kaydırma: Aranıyor... (Adım {i+1}/{max_steps})")
             
-            # v73: Durdurma Kontrolü
+            # Durdurma Kontrolü
             if self.stop_check_callback and self.stop_check_callback(): return False
             
             try:
-                # v167.6: False Positive Fix - Sabit ve yüksek güven eşiği (0.85)
-                # Süre kısa olduğu için dinamik düşüşe izin verme.
-                coords = self.wait_for_element(target, timeout=0.8, confidence=0.85, match_index=match_index, click_offset=click_offset)
+                # Tıklamadaki orijinal motor parametrelerine dokunmadan arama yapıyoruz.
+                # Tıpkı tıklama gibi davranması için confidence vs. eklenmedi, motorun kendi fall-back sistemi çalışsın.
+                # Ekranda tarama yapabilmesi için her adımda 1.0 saniye kadar zaman veriyoruz.
+                coords = self.wait_for_element(target, timeout=1.0, match_index=match_index, click_offset=click_offset)
                 if coords:
                     self.logger.info(f"Akıllı Kaydırma: Hedef bulundu! (Adım {i+1})")
                     return True
             except Exception as e:
                  self.logger.warning(f"Akıllı Kaydırma: Arama hatası (Adım {i+1}): {e}")
 
-            # 2. Bulamazsa KAYDIR
-            self.logger.info(f"Akıllı Kaydırma: Bulunamadı, kaydırılıyor ({i+1}/{max_steps})...")
+            # 2. Bulamazsa KAYDIR (Doğrudan fare tekerleği simülasyonu)
+            self.logger.info(f"Akıllı Kaydırma: Bulunamadı, fare tekerleği simüle ediliyor ({i+1}/{max_steps})...")
             try:
                 pyautogui.scroll(scroll_amount)
+                # Kaydırma sonrası ekranın oturması ve yeni görsellerin render edilmesi için yeterli süre bekle (örneğin 0.5 saniye)
+                time.sleep(0.5)
             except Exception as e:
                 self.logger.error(f"Akıllı Kaydırma: SCROLL Hatası: {e}")
-                # Hata olsa bile devam et, belki bir sonraki adımda düzelir veya hedef zaten görünürdedir.
             
         self.logger.warning("Akıllı Kaydırma: Maksimum adım sayısına ulaşıldı, hedef bulunamadı.")
         return False

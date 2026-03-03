@@ -82,23 +82,28 @@ class DatabaseManager:
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     )
                 """)
-                # Seçiciler (Selectors) tablosu (Yeni)
+                # Suite tablosu: Test Süitlerini JSON olarak saklar
                 cursor.execute("""
-                    CREATE TABLE IF NOT EXISTS selectors (
+                    CREATE TABLE IF NOT EXISTS suites (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         name TEXT NOT NULL,
-                        content TEXT,
-                        type TEXT,
-                        image_data BLOB,
+                        payload TEXT,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     )
                 """)
-                
-                # Migrasyon: Eğer image_data sütunu yoksa ekle
-                try:
-                    cursor.execute("ALTER TABLE selectors ADD COLUMN image_data BLOB")
-                except: pass # Zaten var
-
+                # Suite Geçmişi tablosu: Süit çalışma analizlerini tutar
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS suite_history (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        suite_id INTEGER,
+                        start_time TEXT,
+                        end_time TEXT,
+                        total_scenarios INTEGER,
+                        successful_scenarios INTEGER,
+                        failed_scenarios INTEGER,
+                        FOREIGN KEY (suite_id) REFERENCES suites (id) ON DELETE CASCADE
+                    )
+                """)
                 conn.commit()
         except Exception as e:
             self.logger.error(f"Veritabanı başlatılamadı: {e}")
@@ -258,18 +263,6 @@ class DatabaseManager:
             self.logger.error(f"Varlık aranırken hata: {e}")
             return None
 
-    def get_selector_by_name(self, name):
-        """İsme göre selector döndürür."""
-        try:
-            with self._get_connection() as conn:
-                cursor = conn.cursor()
-                # v160.1: Added image_data to selectors
-                cursor.execute("SELECT id, name, content, type, image_data, created_at FROM selectors WHERE name = ?", (name,))
-                return cursor.fetchone()
-        except Exception as e:
-            self.logger.error(f"Selector aranırken hata: {e}")
-            return None
-
     def delete_asset(self, asset_id):
         """Varlığı veritabanından siler."""
         try:
@@ -296,61 +289,92 @@ class DatabaseManager:
             self.logger.error(f"Varlık verisi alınırken hata: {e}")
             return None
 
-    # --- Seçici (Selector) Yönetimi ---
-    def save_selector(self, name, content, type="xpath", image_data=None):
-        """Yeni bir seçici kaydı oluşturur."""
+    # --- SUITE YÖNETİMİ ---
+
+    def save_suite(self, name: str, payload: dict, suite_id: int = None) -> int:
+        """Suite kaydeder. Yeni ise ID döndürür, varsa günceller."""
         try:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
-                # İçeriğin string olduğundan emin ol
-                if not isinstance(content, str):
-                    content = json.dumps(content)
-                    
-                cursor.execute(
-                    "INSERT INTO selectors (name, content, type, image_data) VALUES (?, ?, ?, ?)",
-                    (name, content, type, image_data)
-                )
+                payload_str = json.dumps(payload)
+                if suite_id:
+                    cursor.execute("UPDATE suites SET name=?, payload=? WHERE id=?", (name, payload_str, suite_id))
+                    if cursor.rowcount == 0:
+                        cursor.execute("INSERT INTO suites (name, payload) VALUES (?, ?)", (name, payload_str))
+                        suite_id = cursor.lastrowid
+                else:
+                    cursor.execute("INSERT INTO suites (name, payload) VALUES (?, ?)", (name, payload_str))
+                    suite_id = cursor.lastrowid
+                conn.commit()
+                return suite_id
+        except Exception as e:
+            self.logger.error(f"Suite kaydedilemedi: {e}")
+            return None
+
+    def list_suites(self):
+        """Tüm suitleri listeler (id, name, created_at)."""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT id, name, created_at FROM suites ORDER BY created_at DESC")
+                return cursor.fetchall()
+        except Exception as e:
+            self.logger.error(f"Suitler listelenemedi: {e}")
+            return []
+
+    def load_suite_by_id(self, suite_id: int):
+        """ID'ye göre Suite payloadunu döndürür."""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT id, name, payload FROM suites WHERE id = ?", (suite_id,))
+                row = cursor.fetchone()
+                if not row: return None
+                return {"id": row[0], "name": row[1], "payload": json.loads(row[2])}
+        except Exception as e:
+            self.logger.error(f"Suite yüklenemedi (ID: {suite_id}): {e}")
+            return None
+
+    def delete_suite(self, suite_id: int) -> bool:
+        """Suite'i siler."""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM suites WHERE id=?", (suite_id,))
+                conn.commit()
+            self.logger.info(f"Suite silindi. ID: {suite_id}")
+            return True
+        except Exception as e:
+            self.logger.error(f"Suite silinemedi (ID: {suite_id}): {e}")
+            return False
+
+    def save_suite_history(self, suite_id: int, start_time: str, end_time: str, total: int, success: int, failed: int):
+        """Süit çalışma istatistiklerini kaydeder."""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    INSERT INTO suite_history (suite_id, start_time, end_time, total_scenarios, successful_scenarios, failed_scenarios)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, (suite_id, start_time, end_time, total, success, failed))
                 conn.commit()
                 return cursor.lastrowid
         except Exception as e:
-            self.logger.error(f"Seçici kaydedilirken hata: {e}")
+            self.logger.error(f"Suite history kaydedilemedi: {e}")
             return None
 
-    def list_selectors(self):
-        """Tüm seçicileri listeler."""
+    def get_suite_history(self, suite_id: int):
+        """Süitin tüm geçmiş çalışmalarını (en yenisi en üstte) döndürür."""
         try:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
-                cursor.execute("SELECT id, name, content, type, created_at, image_data FROM selectors ORDER BY created_at DESC")
+                cursor.execute("""
+                    SELECT id, start_time, end_time, total_scenarios, successful_scenarios, failed_scenarios
+                    FROM suite_history
+                    WHERE suite_id = ?
+                    ORDER BY id DESC
+                """, (suite_id,))
                 return cursor.fetchall()
         except Exception as e:
-            self.logger.error(f"Seçiciler listelenirken hata: {e}")
+            self.logger.error(f"Suite history listelenemedi: {e}")
             return []
-
-    def delete_selector(self, selector_id):
-        """Seçiciyi veritabanından siler."""
-        try:
-            with self._get_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute("DELETE FROM selectors WHERE id = ?", (selector_id,))
-                conn.commit()
-                return True
-        except Exception as e:
-            self.logger.error(f"Seçici silinirken hata: {e}")
-            return False
-
-    def update_selector(self, selector_id, content):
-        """Seçicinin içeriğini günceller."""
-        try:
-            with self._get_connection() as conn:
-                cursor = conn.cursor()
-                if not isinstance(content, str):
-                    content = json.dumps(content)
-                
-                cursor.execute("UPDATE selectors SET content = ? WHERE id = ?", (content, selector_id))
-                conn.commit()
-                return True
-        except Exception as e:
-            self.logger.error(f"Seçici güncellenirken hata: {e}")
-            return False
-

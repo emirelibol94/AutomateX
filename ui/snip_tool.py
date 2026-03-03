@@ -184,7 +184,7 @@ class SnipTool(tk.Toplevel):
         """Ekrandan belirtilen alanı keser ve kaydeder."""
         try:
             from core.config import DATA_DIR
-            filename = f"snip_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+            filename = f"snip_{datetime.datetime.now().astimezone().strftime('%Y%m%d_%H%M%S')}.png"
             # v67 Düzeltme: Assets klasörü silindiği için geçici olarak DATA_DIR'e kaydet
             filepath = os.path.join(DATA_DIR, filename)
 

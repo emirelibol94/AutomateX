@@ -9,12 +9,13 @@ logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 abs_path = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(abs_path)
 
+# PyInstaller statik analizi için içe aktarımları en tepeye taşıdık
+from core.config import initialize_persistence
+from ui.main_window import MainWindow
+
 def main():
-    from core.config import initialize_persistence
     initialize_persistence()
-    
     print("Desktop Otomasyon Başlatılıyor...")
-    from ui.main_window import MainWindow
     app = MainWindow()
     app.mainloop()
 

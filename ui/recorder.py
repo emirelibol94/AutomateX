@@ -67,6 +67,9 @@ class Recorder:
                 self.type_buffer += key.char
             elif key == keyboard.Key.space:
                 self.type_buffer += " "
+            elif key == keyboard.Key.enter:
+                self._flush_type_buffer()
+                self.on_action_recorded("PRESS_KEY", {"key": "enter"})
             else:
                 self._flush_type_buffer()
         except: pass
@@ -77,21 +80,35 @@ class Recorder:
             self.type_buffer = ""
 
     def _capture_and_record(self, x, y, button='left'):
-        """v25: Geniş Açı (Wide-Vision) 300x300 Context Capture."""
+        """v25/v168: Geniş Açı (Wide-Vision) Context Capture optimized to 100x100 for better stability."""
         try:
-            region_size = 300
-            left = max(0, int(x - region_size / 2))
-            top = max(0, int(y - region_size / 2))
+            from core.config import get_dpi_scaling
+            scale = get_dpi_scaling()
+            
+            # v168: Decrease region size to avoid capturing too much dynamic background
+            base_region_size = 100
+            
+            # Scale coordinates and sizes based on DPI
+            sx = int(x * scale)
+            sy = int(y * scale)
+            region_size = int(base_region_size * scale)
+            
+            left = max(0, int(sx - region_size / 2))
+            top = max(0, int(sy - region_size / 2))
             
             screenshot = pyautogui.screenshot(region=(left, top, region_size, region_size))
             
             from core.config import ASSETS_DIR
-            timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
-            filename = f"wide_click_{timestamp}.png"
+            if not os.path.exists(ASSETS_DIR):
+                os.makedirs(ASSETS_DIR)
+                
+            import datetime
+            timestamp = datetime.datetime.now().astimezone().strftime('%Y%m%d_%H%M%S')
+            filename = f"smart_click_{timestamp}.png"
             filepath = os.path.join(ASSETS_DIR, filename)
             
             screenshot.save(filepath)
-            self.logger.info(f"Wide-Vision Capture: {filename} (300x300)")
+            self.logger.info(f"Smart Recorder Capture: {filename} ({region_size}x{region_size}) at dpi {scale}")
             
             # Callback to UI
             params = {"target": filepath, "by_image": True, "button": button}

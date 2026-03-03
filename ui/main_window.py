@@ -8,8 +8,8 @@ from core.runner import AutomationRunner
 from drivers.desktop_driver import DesktopDriver
 from ui.snip_tool import SnipTool
 from ui.overlay import ExecutionOverlay
-from ui.inspector_overlay import InspectorOverlay # v80
 from ui.recorder import Recorder
+from ui.suite_browser import SuiteBrowser
 from core.database import DatabaseManager
 import json
 import os
@@ -146,6 +146,7 @@ class MainWindow(ctk.CTk):
         # v65: İki Ana Görünüm
         self.welcome_frame = ctk.CTkFrame(self, fg_color="transparent")
         self.editor_frame = ctk.CTkFrame(self, fg_color="transparent")
+        self.suite_frame = SuiteBrowser(self, self.db, self.runner, on_back=self.show_welcome)
         
         # Editör Izgarasını Yapılandır (Dahili)
         self.editor_frame.grid_columnconfigure(1, weight=1)
@@ -178,6 +179,9 @@ class MainWindow(ctk.CTk):
         
         btn_load = ctk.CTkButton(center_frame, text="📂 Senaryo Yükle", font=("Arial", 16), width=200, height=50, command=self.show_scenarios_welcome)
         btn_load.pack(pady=10)
+        
+        btn_suites = ctk.CTkButton(center_frame, text="📚 Test Suitleri", font=("Arial", 16), width=200, height=50, command=self.show_suites_welcome)
+        btn_suites.pack(pady=10)
 
         lbl_ver = ctk.CTkLabel(self.welcome_frame, text=f"Sürüm: {APP_VERSION}", text_color="gray")
         lbl_ver.grid(row=1, column=0, pady=20)
@@ -190,6 +194,8 @@ class MainWindow(ctk.CTk):
 
     def show_welcome(self):
         self.editor_frame.grid_forget()
+        if hasattr(self, 'suite_frame'):
+            self.suite_frame.grid_forget()
         self.welcome_frame.grid(row=0, column=0, sticky="nsew")
         self.title("AutomateX - Hoşgeldiniz")
 
@@ -230,6 +236,15 @@ class MainWindow(ctk.CTk):
         self.scenario_browser_win = DatabaseBrowser(self, self.db, on_load)
         self.scenario_browser_win.grab_set()
 
+    def show_suites_welcome(self):
+        """v168: Test Suitleri Yöneticisini Açar"""
+        self.welcome_frame.grid_forget()
+        self.editor_frame.grid_forget()
+        
+        self.suite_frame.refresh_suites()
+        self.suite_frame.grid(row=0, column=0, sticky="nsew")
+        self.title("AutomateX - Test Suitleri")
+
     def go_back_to_welcome(self):
         # v160.2: Auto-save devrede olduğu için onay sormadan dönüyoruz
         # Kullanıcı isteği: "zaten artık auto save yapabiliyoruz"
@@ -264,28 +279,23 @@ class MainWindow(ctk.CTk):
         # Temel Aksiyonlar (v85.2 Refactor)
         self.lbl_basic = ctk.CTkLabel(self.sidebar_frame, text="Temel Aksiyonlar", text_color="white")
         self.lbl_basic.pack(pady=(15, 0))
-
         actions = [
-            ("🖱️ Sol Tıkla (Selector)", lambda: self.start_inspector("left")),
-            ("🖱️ Sağ Tıkla (Selector)", lambda: self.start_inspector("right")),
-            ("🖱️ Çift Tıkla (Selector)", lambda: self.start_inspector("double")),
-            ("🖱️ Sol Tıkla (Görsel)", self.add_click_action),
-            ("🖱️ Sağ Tıkla (Görsel)", self.add_right_click_action),
-            ("🖱️ Çift Tıkla (Görsel)", self.add_double_click_action),
-            ("✍️ Type", self.add_type_action),
+            ("🖱️ Sol Tıkla", self.add_click_action),
+            ("🖱️ Sağ Tıkla", self.add_right_click_action),
+            ("🖱️ Çift Tıkla", self.add_double_click_action),
+            ("✍️ Yazı Yaz", self.add_type_action),
             ("⌨️ Tuş Bas", self.add_key_press_action),
-            ("↕️ Kaydır (Scroll)", self.add_scroll_action),
-            ("⏳ Wait", self.add_wait_action),
-            ("🚀 Launch App", self.add_launch_action),
+            ("🎹 Kısayol Tuşları", self.add_hotkey_action),
+            ("⚡ Çoklu Tuş", self.add_multi_press_action),
+            ("↕️ Kaydır", self.add_scroll_action),
+            ("⏳ Bekle", self.add_wait_action),
+            ("🚀 Uygulama Çalıştır", self.add_launch_action),
+            ("❌ Uygulamayı Kapat", self.add_kill_process_action),
             ("🌍 Siteye Git", self.add_open_browser_action),
         ]
 
         for text, cmd in actions:
-            # Selector için özel renk, ayırt edilmesi için
-            fcolor = "#673AB7" if "Selector" in text else "#555555"
-            hcolor = "#512DA8" if "Selector" in text else "#333333"
-            
-            btn = ctk.CTkButton(self.sidebar_frame, text=text, command=cmd, fg_color=fcolor, hover_color=hcolor)
+            btn = ctk.CTkButton(self.sidebar_frame, text=text, command=cmd, fg_color="#555555", hover_color="#333333")
             btn.pack(pady=3, padx=10, fill="x")
 
         self.lbl_repo = ctk.CTkLabel(self.sidebar_frame, text="Depo (Repository)", text_color="white")
@@ -294,8 +304,6 @@ class MainWindow(ctk.CTk):
         self.btn_assets = ctk.CTkButton(self.sidebar_frame, text="📦 Görsel Öğeler", command=self.show_asset_browser, fg_color="#555555", hover_color="#333333")
         self.btn_assets.pack(pady=5, padx=10, fill="x")
 
-        self.btn_selectors = ctk.CTkButton(self.sidebar_frame, text="🎯 Seçiciler (Selectors)", command=self.show_selector_browser, fg_color="#555555", hover_color="#333333")
-        self.btn_selectors.pack(pady=5, padx=10, fill="x")
 
         # v162.0: Hızlı Kütüphane Kaydı (Move here for visibility)
         self.btn_quick_save = ctk.CTkButton(self.sidebar_frame, text="⚡ Hızlı Kayıt (Kütüphane)", command=self.open_quick_save_dialog, fg_color="#2ECC71", hover_color="#27AE60", text_color="white")
@@ -313,17 +321,10 @@ class MainWindow(ctk.CTk):
         self.btn_vars = ctk.CTkButton(self.sidebar_frame, text="🔢 Değişken Tanımla", command=self.add_variable_action, fg_color="#8E44AD", hover_color="#9B59B6")
         self.btn_vars.pack(pady=5, padx=10, fill="x")
         
-        # v167.24: Veri Okuma
-        self.btn_get_text = ctk.CTkButton(self.sidebar_frame, text="📥 Veri Oku (Get Text)", command=self.add_get_text_action, fg_color="#16A085", hover_color="#1ABC9C")
-        self.btn_get_text.pack(pady=5, padx=10, fill="x")
-
+        # (Get Text removed)
         # Durum Kontrolü (Smart Wait)
-        self.btn_check_state = ctk.CTkButton(self.sidebar_frame, text="👁️ Görseli Bekle (Check)", command=self.add_assert_action, fg_color="#FF9800", hover_color="#F57C00", text_color="black")
+        self.btn_check_state = ctk.CTkButton(self.sidebar_frame, text="👁️ Görseli Bekle", command=self.add_assert_action, fg_color="#FF9800", hover_color="#F57C00", text_color="black")
         self.btn_check_state.pack(pady=5, padx=10, fill="x")
-        
-        # v167.24: Veri Kontrolü
-        self.btn_check_text = ctk.CTkButton(self.sidebar_frame, text="✅ Veri Kontrolü (Check Text)", command=self.add_check_text_action, fg_color="#C0392B", hover_color="#E74C3C")
-        self.btn_check_text.pack(pady=5, padx=10, fill="x")
 
         # v162.0: Hızlı Kütüphane Kaydı (Depo Bölümüne Taşındı)
         # self.btn_quick_save... (Moved up)
@@ -366,8 +367,18 @@ class MainWindow(ctk.CTk):
         self.btn_save = ctk.CTkButton(self.right_frame, text="💾 Kaydet", command=self.save_to_db, fg_color="#194E91", hover_color="#0D47A1")
         self.btn_save.pack(pady=5, padx=10, fill="x")
 
+        # Phase 16: Farklı Kaydet ve İsmi Değiştir
+        self.btn_save_as = ctk.CTkButton(self.right_frame, text="💾 Farklı Kaydet", command=self.save_as_scenario, fg_color="#1E8449", hover_color="#117A65")
+        self.btn_save_as.pack(pady=(0, 5), padx=10, fill="x")
+
+        self.btn_rename_scen = ctk.CTkButton(self.right_frame, text="🖍️ İsmi Değiştir", command=self.rename_scenario, fg_color="#D68910", hover_color="#B9770E", text_color="black")
+        self.btn_rename_scen.pack(pady=(0, 5), padx=10, fill="x")
+
         self.btn_load = ctk.CTkButton(self.right_frame, text="📂 Senaryolar", command=self.show_scenarios, fg_color="#194E91", hover_color="#0D47A1")
         self.btn_load.pack(pady=5, padx=10, fill="x")
+
+        self.btn_append = ctk.CTkButton(self.right_frame, text="➕ Senaryo İçe Aktar", command=self.append_scenario_steps, fg_color="#8E44AD", hover_color="#732D91")
+        self.btn_append.pack(pady=(0, 5), padx=10, fill="x")
 
         # Dışa/İçe Aktar (Export/Import) (v63)
         self.btn_export = ctk.CTkButton(self.right_frame, text="📦 Dışa Aktar (Export)", command=self.export_scenario, fg_color="#2CC985", hover_color="#27AE60", text_color="black")
@@ -434,31 +445,85 @@ class MainWindow(ctk.CTk):
             ent_idx.bind("<Return>", lambda e, i=idx, ent=ent_idx: self.change_step_order(i, ent.get()))
             ent_idx.bind("<FocusOut>", lambda e, i=idx, ent=ent_idx: self.change_step_order(i, ent.get(), silent=True)) # Opsiyonel: Focus çıkınca da kaydetsin mi? Belki tehlikeli olabilir, sadece Enter daha iyi.
 
-            # Adım Bilgisi (Sıra numarası olmadan)
-            lbl_text = f"{action.type}"
-            button_type = action.params.get("button", "left")
-            if button_type == "double":
-                btn_label = "(Çift)"
-            elif button_type == "right":
-                btn_label = "(Sağ)"
-            else:
-                btn_label = "(Sol)"
-
+            # İkon ve Türkçe İsim Haritası (Emoji & localization Mappings)
+            type_map = {
+                "CLICK": ("🖱️", "Sol Tıkla"),
+                "TYPE": ("⌨️", "Yazı Yaz"),
+                "WAIT": ("⏳", "Bekle"),
+                "ASSERT_EXISTS": ("👁️", "Görseli Bekle"),
+                "KILL_PROCESS": ("🔌", "Uygulamayı Kapat"),
+                "LAUNCH_APP": ("🚀", "Uygulama Başlat"),
+                "OPEN_URL": ("🌐", "Siteye Git"),
+                "SCROLL_UNTIL": ("📜", "Kaydırarak Ara"),
+                "VALIDATE_ELEMENT": ("🔎", "Element Doğrula"),
+                "HOTKEY": ("🎹", "Kısayol Tuşu"),
+                "MULTI_PRESS": ("⚡", "Çoklu Tuş"),
+                "PRESS_KEY": ("🔘", "Tuşa Bas"),
+                "HANDLE_POPUP": ("🛡️", "Pop-up Kapat"),
+                "SCROLL": ("↕️", "Kaydır"),
+                "GET_CLIPBOARD": ("📋", "Panoyu Oku"),
+                "SET_VARIABLE": ("📦", "Değişken Ata"),
+                "CHECK_TEXT": ("✔️", "Metin Kontrolü"),
+                "VALIDATE_WINDOW": ("🖥️", "Pencere Doğrula"),
+                "POPUP_CHECK": ("🚨", "Popup Yakala")
+            }
+            
+            icon, tr_name = type_map.get(action.type, ("⚙️", action.type))
+            
+            # Aksiyon ismini buton tipine göre özelleştirme
             if action.type == "CLICK":
-                lbl_text += f" {btn_label}"
-                # GÜNCELLEME (v39): Dosya adı yerine kullanıcının verdiği ismi (description) göster
-                if action.description:
-                    lbl_text += f" - {action.description}"
-                elif action.params.get("by_image"):
-                    lbl_text += f" (Img: {os.path.basename(action.params['target'])})"
-            elif action.type == "CLICK_TEXT":
-                lbl_text += f" {btn_label} ('{action.params.get('text')}')"
-            elif action.type == "TYPE":
-                lbl_text += f" ('{action.params['text']}')"
+                button_type = action.params.get("button", "left")
+                if button_type == "double":
+                    tr_name = "Çift Tıkla"
+                elif button_type == "right":
+                    tr_name = "Sağ Tıkla"
+                else:
+                    tr_name = "Sol Tıkla"
+            
+            lbl_type = f"{icon} {tr_name}"
+            
+            # Adım Bilgisi (Sıra numarası olmadan)
+            lbl_text = f"{lbl_type}"
+
+            # GÜNCELLEME: Eğer açıklama (description) belirtilmişse doğrudanonu ekle
+            if action.description:
+                 # Temizleme: Eski senaryolarda otomatik olarak üretilen İngilizce gereksiz aksiyon ön eklerini filtre et.
+                 import re
+                 desc = action.description
+                 # 'Multi' ve '(Multi)' gibi çoklu tuş özel ibarelerini de listeye dahil edip kesiyoruz
+                 desc = re.sub(r'^(\(?Multi\)?|Type|Right Click|Double Click|Click|Wait for:|Assert Exists:|Open URL:|Open|Kill|Handle Popup:|Check:|Press:|Multi-Press(?:ing)?)\s*:?\s*', '', desc, flags=re.IGNORECASE)
+                 if desc.startswith(action.type): desc = desc.replace(action.type, "", 1)
+                 desc = desc.strip(" -'")
+                 
+                 if desc:
+                     lbl_text += f" - {desc}"
             else:
-                lbl_text += f" - {action.description}"
+                # Açıklama yoksa parametrelerden otomatik bilgi çek
+                if action.type == "CLICK" and action.params.get("by_image"):
+                    lbl_text += f" - {os.path.basename(action.params.get('target', 'Bilinmeyen'))}"
+                elif action.type == "CLICK_TEXT":
+                    lbl_text += f" ('{action.params.get('text')}')"
+                elif action.type == "TYPE":
+                    lbl_text += f" - '{action.params.get('text', '')}'"
+                elif action.type in ("KILL_PROCESS", "LAUNCH_APP"):
+                    val = action.params.get('app_name') or action.params.get('path', '')
+                    lbl_text += f" - '{os.path.basename(val)}'"
+                elif action.type == "WAIT":
+                    lbl_text += f" - {action.params.get('seconds')}sn"
+                elif action.type in ("HOTKEY", "MULTI_PRESS", "PRESS_KEY"):
+                    key = action.params.get('key', '')
+                    if action.type == "MULTI_PRESS":
+                         cnt = action.params.get('presses', 1)
+                         lbl_text += f" - {key} ({cnt} kez)"
+                    elif action.type == "HOTKEY":
+                         mods = "+".join(action.params.get("modifiers", []))
+                         lbl_text += f" - {mods}+{key}" if mods else f" - {key}"
+                    else:
+                         lbl_text += f" - {key}"
+                elif action.type == "OPEN_URL":
+                    lbl_text += f" - {action.params.get('url', '')}"
                 
-            lbl = ctk.CTkLabel(frame, text=lbl_text, anchor="w")
+            lbl = ctk.CTkLabel(frame, text=lbl_text, anchor="w", font=("Arial", 12))
             lbl.pack(side="left", padx=5, expand=True, fill="x")
             
             # Label'a da bind ekle (event'in frame'den geçmesi için)
@@ -477,6 +542,10 @@ class MainWindow(ctk.CTk):
             # Çalıştır Butonu (Buradan Başlat - Debug) (v160.3)
             btn_run_here = ctk.CTkButton(btn_frame, text="▶", width=30, fg_color="#2CC985", hover_color="#229966", command=lambda i=idx: self.run_scenario_from_step(i))
             btn_run_here.pack(side="left", padx=2)
+            
+            # v168.0: Adım İsmini Değiştir (Rename Step)
+            btn_rename_step = ctk.CTkButton(btn_frame, text="🖍️", width=30, fg_color="#F39C12", hover_color="#D68910", text_color="black", command=lambda i=idx: self.rename_step(i))
+            btn_rename_step.pack(side="left", padx=2)
             # Tooltip eklenebilir ama şimdilik ikon yeterli.
 
             # Düzenle Butonu (v46) - Geri Getirildi (v64 gerileme düzeltmesi)
@@ -511,6 +580,14 @@ class MainWindow(ctk.CTk):
                 action.params["url"] = new_url
                 action.description = f"Open URL: {new_url}"
                 self.refresh_step_list()
+
+        elif action.type == "KILL_PROCESS":
+            current_app = action.params.get("app_name", "")
+            new_app = simpledialog.askstring("Düzenle", "Kapatılacak Uygulama (.exe):", initialvalue=current_app)
+            if new_app:
+                action.params["app_name"] = new_app
+                action.description = f"Kill: {new_app}"
+                self.refresh_step_list()
         
         elif action.type == "TYPE":
             current_text = action.params.get("text", "")
@@ -525,8 +602,35 @@ class MainWindow(ctk.CTk):
             new_sec = simpledialog.askstring("Düzenle", "Bekleme Süresi (sn):", initialvalue=str(current_sec))
             if new_sec:
                 action.params["seconds"] = new_sec
-                action.description = f"Wait {new_sec}s"
+                action.description = f"{new_sec}sn"
                 self.refresh_step_list()
+
+        elif action.type == "PRESS_KEY":
+            # v168.0: Tuş Bas aksiyonunu değiştirme özelliği (Mavi Kalem)
+            dialog = ctk.CTkToplevel(self)
+            dialog.title("Değiştir: Tuşa Bas")
+            dialog.geometry("300x200")
+            dialog.grab_set()
+            
+            ctk.CTkLabel(dialog, text="Yeni basılacak tuşu seçin:").pack(pady=10)
+            keys = ["enter", "tab", "esc", "backspace", "delete", "space", "home", "end", "pgup", "pgdn", "up", "down", "left", "right", "f1", "f2", "f3", "f4", "f5", "f6", "f7", "f8", "f9", "f10", "f11", "f12"]
+            current_key = action.params.get("key", "enter")
+            
+            combo = ctk.CTkComboBox(dialog, values=keys)
+            combo.pack(pady=10)
+            if current_key in keys: combo.set(current_key)
+            else: combo.set("enter")
+            
+            def save():
+                key = combo.get()
+                action.params["key"] = key
+                action.description = f"{key}"
+                self.refresh_step_list()
+                if self.current_scenario.id:
+                    self.db.save_scenario(self.current_scenario)
+                dialog.destroy()
+                
+            ctk.CTkButton(dialog, text="Kaydet", command=save, fg_color="#2ECC71", hover_color="#27AE60", text_color="black").pack(pady=10)
 
         elif action.type == "ASSERT_EXISTS":
             current = action.params.get("timeout", 10)
@@ -549,36 +653,38 @@ class MainWindow(ctk.CTk):
                  messagebox.showinfo("Bilgi", "Sadece görsel ile yapılan tıklamalar için gelişmiş ayarlar yapılabilir.")
                  return
 
-            # Gelişmiş Ayarlar Menüsü (v63)
+            # Gelişmiş Ayarlar Menüsü (v63 / v168.0)
             dialog = ctk.CTkToplevel(self)
             dialog.title("Tıklama Ayarları")
             dialog.geometry("300x500")
+            dialog.transient(self)
             dialog.grab_set()
             
-            # v72: Dinamik Güvenlik (Dynamic Confidence) Mantığı
-            current_conf = action.params.get("confidence")
-            is_dynamic = current_conf is None
+            # v168.0: Görsel Ön İzlemesi
+            from PIL import Image
+            import io
             
-            def toggle_dynamic():
-                if dyn_var.get():
-                    conf_entry.configure(state="disabled", fg_color="gray")
+            target = action.params.get("target")
+            if target:
+                img_bytes = self.db.get_asset_data(os.path.basename(target))
+                if img_bytes:
+                    try:
+                        img = Image.open(io.BytesIO(img_bytes))
+                        # Resize by keeping aspect ratio to fit inside 250x150
+                        img.thumbnail((250, 150))
+                        ctk_img = ctk.CTkImage(light_image=img, dark_image=img, size=img.size)
+                        lbl_img = ctk.CTkLabel(dialog, text="", image=ctk_img)
+                        lbl_img.pack(pady=10)
+                        
+                        lbl_img_name = ctk.CTkLabel(dialog, text=f"Hedef Görsel:\n{os.path.basename(target)}", font=("Arial", 10, "italic"))
+                        lbl_img_name.pack(pady=(0, 10))
+                    except Exception as e:
+                        self.logger.error(f"Görsel yüklenemedi: {e}")
+                        ctk.CTkLabel(dialog, text="(Görsel Yüklenemedi)").pack(pady=10)
                 else:
-                    conf_entry.configure(state="normal", fg_color=["#F9F9FA", "#343638"]) # Varsayılan renkler
-            
-            dyn_var = ctk.BooleanVar(value=is_dynamic)
-            chk_dyn = ctk.CTkCheckBox(dialog, text="Dinamik Güvenlik (Önerilen)", variable=dyn_var, command=toggle_dynamic)
-            chk_dyn.pack(pady=15)
+                    ctk.CTkLabel(dialog, text="(Görsel Veritabanında Bulunamadı)").pack(pady=10)
 
-            ctk.CTkLabel(dialog, text="Hassasiyet (0.1-1.0):").pack(pady=5)
-            # Eğer dinamikse, varsayılan 0.85 göster (ama devre dışı olacak)
-            disp_val = str(current_conf) if current_conf is not None else "0.85"
-            conf_var = ctk.StringVar(value=disp_val)
-            conf_entry = ctk.CTkEntry(dialog, textvariable=conf_var)
-            conf_entry.pack(pady=5)
-            
-            if is_dynamic:
-                conf_entry.configure(state="disabled", fg_color="gray")
-            
+            # Sadece Macth Index ve Offset tutularak GUI hafifletildi
             ctk.CTkLabel(dialog, text="Eşleşme Sırası (Match Index):").pack(pady=5)
             idx_var = ctk.StringVar(value=str(action.match_index))
             ctk.CTkEntry(dialog, textvariable=idx_var).pack(pady=5)
@@ -589,10 +695,8 @@ class MainWindow(ctk.CTk):
             
             def save_settings():
                 try:
-                    if dyn_var.get():
-                        action.params["confidence"] = None # Dinamik
-                    else:
-                        action.params["confidence"] = float(conf_var.get())
+                    # Deprecated parameters safely nullified to keep backwards compatibility locally unmarred
+                    action.params["confidence"] = None 
 
                     action.match_index = int(idx_var.get())
                     ox, oy = map(float, off_var.get().split(','))
@@ -610,62 +714,6 @@ class MainWindow(ctk.CTk):
             
             ctk.CTkButton(dialog, text="Kaydet", command=save_settings).pack(pady=20)
         
-        elif action.type == "CLICK_SELECTOR":
-            # v80.1: JSON ile Selector Düzenleme
-            import json
-            current_sel = action.params.get("selector", {})
-            current_name = action.params.get("selector_name", "Element")
-            
-            # Ham JSON düzenlemek için büyük metin alanı içeren bir diyalog göster
-            dialog = ctk.CTkToplevel(self)
-            dialog.title(f"Düzenle: {current_name}")
-            dialog.geometry("500x500")
-            dialog.grab_set()
-            
-            ctk.CTkLabel(dialog, text="Selector JSON (Gelişmiş Düzenleme):", font=("Arial", 12, "bold")).pack(pady=5)
-            
-            txt_json = ctk.CTkTextbox(dialog, width=450, height=350, font=("Consolas", 10))
-            txt_json.pack(pady=5, padx=10)
-            
-            # Ön doldurma
-            try:
-                txt_json.insert("1.0", json.dumps(current_sel, indent=4))
-            except:
-                txt_json.insert("1.0", str(current_sel))
-                
-            def save_selector_json():
-                try:
-                    new_json_str = txt_json.get("1.0", "end").strip()
-                    new_sel = json.loads(new_json_str)
-                    
-                    action.params["selector"] = new_sel
-                    # İndeks değiştiyse açıklamayı da güncelle
-                    # Ama açıklama genellikle "Tıkla: İsim" şeklindedir
-                    
-                    self.refresh_step_list()
-                    if self.current_scenario.id:
-                        self.db.save_scenario(self.current_scenario)
-                        
-                    dialog.destroy()
-                    messagebox.showinfo("Başarılı", "Selector güncellendi!")
-                except Exception as e:
-                    messagebox.showerror("Hata", f"Geçersiz JSON: {e}")
-
-            ctk.CTkButton(dialog, text="Kaydet", command=save_selector_json).pack(pady=10)
-            
-            # İndeks için Yardımcı
-            def fast_add_index():
-                 try:
-                    js = json.loads(txt_json.get("1.0", "end").strip())
-                    cur_idx = js.get("foundIndex", 1)
-                    new = simpledialog.askinteger("Hızlı Index", "Index Numarası:", initialvalue=cur_idx)
-                    if new:
-                        js["foundIndex"] = new
-                        txt_json.delete("1.0", "end")
-                        txt_json.insert("1.0", json.dumps(js, indent=4))
-                 except: pass
-            
-            ctk.CTkButton(dialog, text="🔢 Hızlı Index Değiştir", fg_color="gray", command=fast_add_index).pack(pady=5)
 
         else:
             messagebox.showinfo("Bilgi", "Bu adım türü için düzenleme desteği henüz eklenmedi.")
@@ -730,14 +778,33 @@ class MainWindow(ctk.CTk):
                         
                         img_lbl = ctk.CTkLabel(f, image=tk_img, text="")
                         img_lbl.pack(side="left", padx=5)
+                        
+                        # v168.0: Görsel Büyütme İşlevi (Tıklanınca)
+                        def create_zoom_handler(data):
+                            def show_full_image(e):
+                                top = ctk.CTkToplevel(dialog)
+                                top.title("Görsel İncelemesi (Büyük Boyut)")
+                                top.geometry("800x600")
+                                top.transient(dialog)
+                                try:
+                                    full_pil = Image.open(io.BytesIO(data))
+                                    full_pil.thumbnail((780, 580))
+                                    full_tk = ImageTk.PhotoImage(full_pil)
+                                    lbl = ctk.CTkLabel(top, image=full_tk, text="")
+                                    lbl.image = full_tk # Ref tutucu
+                                    lbl.pack(expand=True, fill="both")
+                                except: pass
+                            return show_full_image
+                        
+                        img_lbl.bind("<Button-1>", create_zoom_handler(preview_data))
+                        img_lbl.configure(cursor="hand2")
                     except:
                         pass
                 
                 # Metin Bilgisi
                 info_frame = ctk.CTkFrame(f, fg_color="transparent")
                 info_frame.pack(side="left", padx=10, fill="y", expand=True)
-                
-                type_icon = "🎯" if t_type == "selector" else "🖼️"
+                type_icon = "🖼️"
                 ctk.CTkLabel(info_frame, text=f"{type_icon} {t_value}", font=("Arial", 12, "bold"), anchor="w").pack(fill="x")
                 if details:
                     ctk.CTkLabel(info_frame, text=details, font=("Arial", 9), text_color="gray", anchor="w").pack(fill="x")
@@ -761,20 +828,6 @@ class MainWindow(ctk.CTk):
         btn_frame = ctk.CTkFrame(dialog, fg_color="transparent")
         btn_frame.pack(pady=15)
 
-        def add_selector():
-            def on_select(selector_data):
-                # selector_data: (id, name, content, type, image_data)
-                name = selector_data[1]
-                triggers.append({"type": "selector", "value": name, "action": "click"})
-                refresh_list()
-                save_changes()
-                if hasattr(self, 'pop_selector_browser'):
-                    self.pop_selector_browser.destroy()
-            
-            # v160.9: SelectorBrowser'ı dialog'un üzerinde aç
-            self.pop_selector_browser = SelectorBrowser(dialog, self.db, on_select, mode="pick")
-            self.pop_selector_browser.grab_set()
-
         def add_image():
             def on_selected(path, name):
                 # AssetBrowser pick modunda name döndürür
@@ -788,7 +841,6 @@ class MainWindow(ctk.CTk):
             self.pop_asset_browser = AssetBrowser(dialog, self.db, on_selected, mode="pick")
             self.pop_asset_browser.grab_set()
 
-        ctk.CTkButton(btn_frame, text="🎯 Selector Kütüphanesi", command=add_selector, font=("Arial", 12)).pack(side="left", padx=10)
         ctk.CTkButton(btn_frame, text="🖼️ Görsel Kütüphanesi", command=add_image, font=("Arial", 12)).pack(side="left", padx=10)
 
     def delete_step(self, index):
@@ -905,6 +957,21 @@ class MainWindow(ctk.CTk):
             )
             self.recorder.start()
             self.btn_smart_rec.configure(text="⏹ Kaydı Bitir (ESC)")
+            
+            # Kayıt göstergesi (Indicator)
+            self.rec_indicator = ctk.CTkToplevel(self)
+            self.rec_indicator.title("Kayıt")
+            self.rec_indicator.geometry("250x40")
+            self.rec_indicator.overrideredirect(True)
+            self.rec_indicator.attributes("-topmost", True)
+            
+            # Ekranın üst ortasında göster
+            sw = self.rec_indicator.winfo_screenwidth()
+            x = (sw // 2) - 125
+            self.rec_indicator.geometry(f"+{x}+10")
+            
+            lbl = ctk.CTkLabel(self.rec_indicator, text="🔴 Kayıt Devam Ediyor... (ESC)", font=("Arial", 14, "bold"), text_color="red")
+            lbl.pack(expand=True, fill="both")
 
     def on_action_recorded_callback(self, action_type, params):
         # Thread güvenliği için after kullanıyoruz
@@ -915,7 +982,8 @@ class MainWindow(ctk.CTk):
         if action_type == "CLICK":
             description = f"Click Image: {os.path.basename(params['target'])}"
             # Otomatik kaydı da kütüphaneye ekle
-            asset_name = f"auto_{datetime.datetime.now().strftime('%H%M%S')}_{os.path.basename(params['target'])}"
+            timestamp = datetime.datetime.now().astimezone().strftime('%H%M%S')
+            asset_name = f"auto_{timestamp}_{os.path.basename(params['target'])}"
             self.db.save_asset(asset_name, params['target'])
             
             # v66: Dosyayı SİL ve hedefi sadece İSİM yap
@@ -937,7 +1005,12 @@ class MainWindow(ctk.CTk):
 
     def _on_recorder_stop_ui(self):
         self.deiconify() # Arayüzü geri getir
-        self.btn_smart_rec.configure(text="📸 Kaydı Başlat")
+        self.btn_smart_rec.configure(text="� Kaydı Başlat")
+        
+        if hasattr(self, 'rec_indicator') and self.rec_indicator:
+            self.rec_indicator.destroy()
+            self.rec_indicator = None
+            
         messagebox.showinfo("Kayıt Tamamlandı", "Otomatik kayıt sonlandırıldı.")
 
     def smart_record_click(self):
@@ -1000,7 +1073,7 @@ class MainWindow(ctk.CTk):
         
         action = Action(type="CLICK", 
                         params={"target": name, "by_image": True}, 
-                        description=f"Click: {name}",
+                        description=f"{name}",
                         offset=offset)
         self.current_scenario.add_action(action)
         self.refresh_step_list()
@@ -1033,7 +1106,7 @@ class MainWindow(ctk.CTk):
         # Action ekle (button="right")
         action = Action(type="CLICK", 
                         params={"target": name, "by_image": True, "button": "right"}, 
-                        description=f"Right Click: {name}",
+                        description=f"{name}",
                         offset=offset)
         self.current_scenario.add_action(action)
         self.refresh_step_list()
@@ -1049,7 +1122,10 @@ class MainWindow(ctk.CTk):
     def _on_manual_double_click_snip_complete(self, filepath, offset=(0, 0)):
         name = simpledialog.askstring("Kütüphaneye Kaydet", f"Çift Tıklanacak Görselin Adı (Offset: {offset}):")
         
-        if name is None: return
+        if name is None: 
+            try: os.remove(filepath) # Kullanıcı iptal ederse geçici dosyayı sil
+            except: pass
+            return
             
         if not name.strip():
             name = f"manual_double_click_{os.path.basename(filepath)}"
@@ -1064,7 +1140,7 @@ class MainWindow(ctk.CTk):
         # Action ekle (button="double")
         action = Action(type="CLICK", 
                         params={"target": name, "by_image": True, "button": "double"}, 
-                        description=f"Double Click: {name}",
+                        description=f"{name}",
                         offset=offset)
         self.current_scenario.add_action(action)
         self.refresh_step_list()
@@ -1075,10 +1151,10 @@ class MainWindow(ctk.CTk):
 
     def add_type_action(self):
         # v155: Basitleştirilmiş Yazma Aksiyonu - Varsayılan olarak Hızlı (0.01s)
-        dialog = ctk.CTkInputDialog(text="Yazılacak metin:", title="Metin Yaz (Type)")
+        dialog = ctk.CTkInputDialog(text="Yazılacak metin:", title="Yazı Yaz")
         text = dialog.get_input()
         if text:
-            action = Action(type="TYPE", params={"text": text, "interval": 0.01}, description=f"Type (Hızlı): '{text}'")
+            action = Action(type="TYPE", params={"text": text, "interval": 0.01}, description=f"{text}")
             self.current_scenario.add_action(action)
             self.refresh_step_list()
             # v70.2: Auto-save
@@ -1103,7 +1179,7 @@ class MainWindow(ctk.CTk):
         
         def add():
             key = combo.get()
-            action = Action(type="PRESS_KEY", params={"key": key}, description=f"Press Key: {key}")
+            action = Action(type="PRESS_KEY", params={"key": key}, description=f"{key}")
             self.current_scenario.add_action(action)
             self.refresh_step_list()
             # v70.2: Auto-save
@@ -1126,9 +1202,7 @@ class MainWindow(ctk.CTk):
         tabview.pack(expand=True, fill="both", padx=10, pady=10)
         
         tab_manual = tabview.add("Manuel Kaydırma")
-        tab_smart = tabview.add("Görsel (Smart)")
-        tab_selector = tabview.add("Seçici (Smart)")
-        
+        tab_smart = tabview.add("Görseli Bulana Kadar")        
         # --- TAB 1: MANUEL ---
         lbl_dir = ctk.CTkLabel(tab_manual, text="Kaydırma Yönü:", font=("Arial", 12, "bold"))
         lbl_dir.pack(pady=5)
@@ -1195,6 +1269,9 @@ class MainWindow(ctk.CTk):
                 if filepath:
                     self.smart_scroll_target = filepath
                     self.lbl_target_status.configure(text=f"Seçildi: {os.path.basename(filepath)} ✅", text_color="green")
+                else: # Kullanıcı iptal ederse
+                    try: os.remove(filepath)
+                    except: pass
             
             self.start_snip_tool(on_snip)
             
@@ -1233,7 +1310,7 @@ class MainWindow(ctk.CTk):
         lbl_step = ctk.CTkLabel(tab_smart, text="Adım Miktarı (Scroll Step):", font=("Arial", 12, "bold"))
         lbl_step.pack(pady=(10, 5))
         
-        step_var = ctk.StringVar(value="300") # Default reduced from 500 to 300
+        step_var = ctk.StringVar(value="1000") # Default increased to 1000 for faster scroll
         ent_step = ctk.CTkEntry(tab_smart, textvariable=step_var)
         ent_step.pack(pady=5)
         
@@ -1258,6 +1335,9 @@ class MainWindow(ctk.CTk):
                 # Kaydet asset
                 name = f"smart_scroll_{os.path.basename(target_val)}"
                 self.db.save_asset(name, target_val)
+                # v168.5: Fiziksel PNG'yi sil
+                try: os.remove(target_val)
+                except: pass
                 target_val = name
             
             action = Action(type="SCROLL_UNTIL", 
@@ -1273,131 +1353,11 @@ class MainWindow(ctk.CTk):
             # v70.2: Auto-save
             if self.current_scenario.id:
                 self.db.save_scenario(self.current_scenario)
+            dialog.destroy()
         btn_add_smart = ctk.CTkButton(tab_smart, text="Ekle", command=add_smart, fg_color="#194E91")
         btn_add_smart.pack(pady=20, fill="x", padx=20)
 
-        # --- TAB 3: SEÇİCİ (SMART) ---
-        lbl_sel_info = ctk.CTkLabel(tab_selector, text="Hedef elementi bulana kadar kaydırır.", text_color="gray")
-        lbl_sel_info.pack(pady=5)
-        self.smart_scroll_selector = None
-        lbl_sel_status = ctk.CTkLabel(tab_selector, text="Seçici Seçilmedi ❌", text_color="red")
-        lbl_sel_status.pack(pady=5)
 
-        # v164.0: Embedded Selector List
-        sel_list_frame = ctk.CTkScrollableFrame(tab_selector, height=250) # v165: Increased height
-        sel_list_frame.pack(fill="both", expand=True, padx=10, pady=5)
-
-        def refresh_selector_list():
-            for w in sel_list_frame.winfo_children(): w.destroy()
-            selectors = self.db.list_selectors()
-            for s_id, name, content, s_type, created, img_data in selectors:
-                f = ctk.CTkFrame(sel_list_frame)
-                f.pack(fill="x", pady=2)
-                ctk.CTkLabel(f, text=name, anchor="w").pack(side="left", padx=5, expand=True, fill="x")
-                ctk.CTkButton(f, text="Seç", width=50, fg_color="#27AE60",
-                             command=lambda c=content, n=name: select_from_list(c, n)).pack(side="right", padx=2)
-
-        def select_from_list(content, name):
-            self.smart_scroll_selector = {"name": name, "content": content}
-            lbl_sel_status.configure(text=f"Seçildi: {name} ✅", text_color="green")
-
-        def pick_new_selector():
-            # v165.0: Direct capture
-            def on_captured(*args):
-                # v166: Return Scroll Dialog
-                dialog.deiconify()
-                dialog.lift()
-                dialog.focus_force()
-                dialog.grab_set() # v167: Re-grab focus
-                
-                # selector extraction logic (reused from _on_spy_selected)
-                selector = args[1] if len(args) == 4 else (args[0] if len(args) == 1 else None)
-                if not selector: return
-                
-                default_name = selector.get("ControlName") or selector.get("AutomationId") or "Element"
-                name = simpledialog.askstring("Hızlı Kayıt", "Seçici İsmi:", initialvalue=default_name)
-                
-                # v167: If user cancels name, we still return to dialog
-                if not name: 
-                    dialog.grab_set()
-                    return
-
-                image_data = args[3] if len(args) == 4 else None
-                self.db.save_selector(name, selector, image_data=image_data)
-                if image_data: self.db.save_asset(name, image_data)
-                
-                # Automatically select it
-                select_from_list(selector, name)
-                refresh_selector_list()
-                # v167: Removed blocking success message for seamless flow
-                # messagebox.showinfo("Başarılı", f"'{name}' yakalandı ve kütüphaneye eklendi.")
-
-            dialog.grab_release() # v167: Release grab before hiding
-            dialog.withdraw() # Hide dialog for capture
-            self.iconify()
-            self.update() # v167: Force UI update to hide window
-            import time
-            time.sleep(0.2) # Small delay to ensure visual clear
-            InspectorOverlay(self, on_captured)
-
-        # Buttons Center Frame
-        btn_center_frame = ctk.CTkFrame(tab_selector, fg_color="transparent")
-        btn_center_frame.pack(pady=5)
-
-        ctk.CTkButton(btn_center_frame, text="🎯 Yeni Seçici Yakala", command=pick_new_selector, fg_color="#E67E22").pack(side="left", padx=5)
-        ctk.CTkButton(btn_center_frame, text="🔄 Listeyi Yenile", command=refresh_selector_list, width=100).pack(side="left", padx=5)
-        
-        sel_dir_var = ctk.StringVar(value="down")
-        rb_sel_down = ctk.CTkRadioButton(tab_selector, text="⬇️ Aşağı Doğru Ara", variable=sel_dir_var, value="down")
-        rb_sel_down.pack(pady=2)
-        rb_sel_up = ctk.CTkRadioButton(tab_selector, text="⬆️ Yukarı Doğru Ara", variable=sel_dir_var, value="up")
-        rb_sel_up.pack(pady=2)
-        
-        # Horizontal Frame for Max/Step
-        val_frame = ctk.CTkFrame(tab_selector, fg_color="transparent")
-        val_frame.pack(pady=5)
-        
-        ctk.CTkLabel(val_frame, text="Maks Adım:").pack(side="left", padx=5)
-        sel_max_steps_var = ctk.StringVar(value="10")
-        ctk.CTkEntry(val_frame, textvariable=sel_max_steps_var, width=60).pack(side="left", padx=5)
-        
-        ctk.CTkLabel(val_frame, text="Adım Miktarı:").pack(side="left", padx=5)
-        sel_step_size_var = ctk.StringVar(value="300")
-        ctk.CTkEntry(val_frame, textvariable=sel_step_size_var, width=60).pack(side="left", padx=5)
-
-        refresh_selector_list()
-
-        def add_smart_selector():
-            if not self.smart_scroll_selector:
-                messagebox.showerror("Hata", "Lütfen önce kütüphaneden bir seçici seçin.")
-                return
-            
-            direction = sel_dir_var.get()
-            try: max_steps = int(sel_max_steps_var.get())
-            except: max_steps = 10
-            
-            try: step_val = int(sel_step_size_var.get())
-            except: step_val = 300
-            
-            action = Action(type="SCROLL_UNTIL", 
-                            params={
-                                "selector": self.smart_scroll_selector["content"], 
-                                "selector_name": self.smart_scroll_selector["name"],
-                                "direction": direction, 
-                                "max_steps": max_steps,
-                                "step": step_val,
-                                "by_selector": True
-                            }, 
-                            description=f"Scroll {direction.upper()} until element: {self.smart_scroll_selector['name']}")
-            self.current_scenario.add_action(action)
-            self.refresh_step_list()
-            # v70.2: Auto-save
-            if self.current_scenario.id:
-                self.db.save_scenario(self.current_scenario)
-            dialog.destroy()
-
-        btn_add_sel_smart = ctk.CTkButton(tab_selector, text="Ekle", command=add_smart_selector, fg_color="#194E91", height=40)
-        btn_add_sel_smart.pack(pady=10, fill="x", padx=20)
 
     def add_popup_step(self):
         """v160.6: Pop-up Yakalama adımı ekler."""
@@ -1412,67 +1372,17 @@ class MainWindow(ctk.CTk):
         # self.edit_step(len(self.current_scenario.actions) - 1) # This line is commented out or not present in the original context, so I'll keep it as is from the user's snippet.
 
     def add_wait_action(self):
-        dialog = ctk.CTkInputDialog(text="Süre (saniye):", title="Wait Action")
+        dialog = ctk.CTkInputDialog(text="Süre (saniye):", title="Bekleme Aksiyonu")
         seconds = dialog.get_input()
         if seconds:
-            action = Action(type="WAIT", params={"seconds": seconds}, description=f"Wait {seconds}s")
+            action = Action(type="WAIT", params={"seconds": seconds}, description=f"{seconds}s Bekle")
             self.current_scenario.add_action(action)
             self.refresh_step_list()
             # v70.2: Auto-save
             if self.current_scenario.id:
                 self.db.save_scenario(self.current_scenario)
 
-    # v167.24: GET TEXT & CHECK TEXT UI
-    def add_get_text_action(self):
-        """Ekranda seçilen bir alandaki metni okuyup değişkene kaydetme."""
-        # Selector List
-        selectors = self.db.list_selectors()
-        if not selectors:
-            messagebox.showwarning("Uyarı", "Kayıtlı seçici bulunamadı! Önce 'Seçiciler' menüsünden bir alan tanımlayın.")
-            return
-            
-        sel_names = [s[1] for s in selectors]
-        
-        # Variable List (from scenario settings)
-        var_names = list(self.current_scenario.variables.keys()) if self.current_scenario.variables else []
-        if not var_names:
-            messagebox.showwarning("Uyarı", "Senaryoda tanımlı değişken yok! Önce 'Değişken Tanımla' menüsünden değişken oluşturun.")
-            return
-            
-        # Dialog
-        dialog = ctk.CTkToplevel(self)
-        dialog.title("Veri Okuma (Get Text)")
-        dialog.geometry("400x300")
-        dialog.transient(self)
-        dialog.grab_set()
-        
-        ctk.CTkLabel(dialog, text="Hangi alandan okunacak?", font=("Arial", 12, "bold")).pack(pady=5)
-        cmb_selector = ctk.CTkComboBox(dialog, values=sel_names)
-        cmb_selector.pack(pady=5)
-        
-        ctk.CTkLabel(dialog, text="Hangi değişkene kaydedilecek?", font=("Arial", 12, "bold")).pack(pady=5)
-        cmb_variable = ctk.CTkComboBox(dialog, values=var_names)
-        cmb_variable.set(var_names[0])
-        cmb_variable.pack(pady=5)
-        
-        def save():
-            sel = cmb_selector.get()
-            var = cmb_variable.get()
-            
-            if not sel or not var: return
-            
-            action = Action(
-                type="GET_TEXT", 
-                params={"selector": sel, "variable": var}, 
-                description=f"Read Text: '{sel}' -> ${{{var}}}"
-            )
-            self.current_scenario.add_action(action)
-            self.refresh_step_list()
-            if self.current_scenario.id: self.db.save_scenario(self.current_scenario)
-            dialog.destroy()
-            
-        ctk.CTkButton(dialog, text="Ekle", command=save, fg_color="#27AE60").pack(pady=20)
-
+    # CHECK TEXT UI (Get Text removed)
     def add_check_text_action(self):
         """Bir değişkenin değerini kontrol etme."""
         # Variable List
@@ -1534,10 +1444,6 @@ class MainWindow(ctk.CTk):
                                command=lambda: [dialog.destroy(), self.quick_save_image()])
         btn_img.pack(pady=10, padx=20, fill="x")
 
-        btn_sel = ctk.CTkButton(dialog, text="🎯 Selector Kaydet (Spy)", height=45, fg_color="#9B59B6",
-                               command=lambda: [dialog.destroy(), self.quick_save_selector()])
-        btn_sel.pack(pady=10, padx=20, fill="x")
-
     def quick_save_image(self):
         """Sadece kütüphaneye kaydetmek üzere SnipTool başlatır."""
         self.start_snip_tool(self._on_quick_snip_complete)
@@ -1555,36 +1461,7 @@ class MainWindow(ctk.CTk):
         
         messagebox.showinfo("Başarılı", f"'{name}' görseli kütüphaneye kaydedildi.")
 
-    def quick_save_selector(self):
-        """Sadece kütüphaneye kaydetmek üzere InspectorOverlay başlatır."""
-        self.iconify()
-        InspectorOverlay(self, self._on_quick_spy_selected)
 
-    def _on_quick_spy_selected(self, *args):
-        """Selectorü sadece DB'ye kaydeder, aksiyon eklemez."""
-        self.deiconify()
-        
-        selector = None
-        image_data = None
-        
-        if len(args) == 4:
-            _, selector, _, image_data = args
-        elif len(args) == 1:
-            selector = args[0]
-
-        if not selector: return
-
-        default_name = selector.get("ControlName") or selector.get("AutomationId") or "Element"
-        name = simpledialog.askstring("Seçiciyi Kaydet", "Seçici İsmi:", initialvalue=default_name)
-        
-        if not name: return
-
-        self.db.save_selector(name, selector, image_data=image_data)
-        if image_data:
-            self.db.save_asset(name, image_data)
-        
-        messagebox.showinfo("Başarılı", f"'{name}' seçicisi kütüphaneye kaydedildi.")
-            
     def add_launch_action(self):
         file_path = filedialog.askopenfilename(title="Uygulama Seç", filetypes=[("Executables", "*.exe"), ("All Files", "*.*")])
         if file_path:
@@ -1595,6 +1472,115 @@ class MainWindow(ctk.CTk):
             if self.current_scenario.id:
                 self.db.save_scenario(self.current_scenario)
 
+    def add_kill_process_action(self):
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Uygulama Kapat (Kill Process)")
+        dialog.geometry("400x250")
+        dialog.grab_set()
+        
+        ctk.CTkLabel(dialog, text="Kapatılacak uygulamanın .exe adını yazın\nveya listeden / dosyadan seçin:").pack(pady=10)
+        
+        entry = ctk.CTkEntry(dialog, width=250, placeholder_text="Örn: chrome.exe")
+        entry.pack(pady=5)
+        
+        def browse_file():
+            filepath = filedialog.askopenfilename(title="Kapatılacak Uygulamayı Seç", filetypes=[("Executables", "*.exe"), ("All Files", "*.*")])
+            if filepath:
+                basename = os.path.basename(filepath)
+                entry.delete(0, 'end')
+                entry.insert(0, basename)
+                
+        btn_browse = ctk.CTkButton(dialog, text="📁 Dosya Seç (.exe)", command=browse_file, fg_color="#F39C12", hover_color="#D68910", text_color="black")
+        btn_browse.pack(pady=5)
+        
+        def on_add():
+            app_name = entry.get().strip()
+            if app_name:
+                action = Action(type="KILL_PROCESS", params={"app_name": app_name}, description=f"Kill: {app_name}")
+                self.current_scenario.add_action(action)
+                self.refresh_step_list()
+                if self.current_scenario.id:
+                    self.db.save_scenario(self.current_scenario)
+            dialog.destroy()
+            
+        btn_add = ctk.CTkButton(dialog, text="➕ Ekle", command=on_add, fg_color="#2ECC71", hover_color="#27AE60", text_color="black")
+        btn_add.pack(pady=10)
+
+    def add_hotkey_action(self):
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Klavye Kısayolu (Hotkey)")
+        dialog.geometry("350x300")
+        dialog.grab_set()
+        
+        ctk.CTkLabel(dialog, text="Kombinasyon seçin:", font=("Arial", 12, "bold")).pack(pady=10)
+        
+        frame_mods = ctk.CTkFrame(dialog, fg_color="transparent")
+        frame_mods.pack(pady=5)
+        
+        var_ctrl = ctk.BooleanVar()
+        var_alt = ctk.BooleanVar()
+        var_shift = ctk.BooleanVar()
+        var_win = ctk.BooleanVar()
+        
+        ctk.CTkCheckBox(frame_mods, text="Ctrl", variable=var_ctrl).grid(row=0, column=0, padx=5, pady=5)
+        ctk.CTkCheckBox(frame_mods, text="Alt", variable=var_alt).grid(row=0, column=1, padx=5, pady=5)
+        ctk.CTkCheckBox(frame_mods, text="Shift", variable=var_shift).grid(row=1, column=0, padx=5, pady=5)
+        ctk.CTkCheckBox(frame_mods, text="Win", variable=var_win).grid(row=1, column=1, padx=5, pady=5)
+        
+        ctk.CTkLabel(dialog, text="Harf veya Özel Tuş (Örn: c, delete, esc):").pack(pady=5)
+        ent_key = ctk.CTkEntry(dialog, width=150)
+        ent_key.pack(pady=5)
+        
+        def save():
+            keys = []
+            if var_ctrl.get(): keys.append("ctrl")
+            if var_alt.get(): keys.append("alt")
+            if var_shift.get(): keys.append("shift")
+            if var_win.get(): keys.append("win")
+            
+            main_key = ent_key.get().strip().lower()
+            if main_key: keys.append(main_key)
+            
+            if not keys: return
+            
+            keys_str = " + ".join(keys)
+            action = Action(type="HOTKEY", params={"keys": keys}, description=f"Hotkey: {keys_str}")
+            self.current_scenario.add_action(action)
+            self.refresh_step_list()
+            if self.current_scenario.id: self.db.save_scenario(self.current_scenario)
+            dialog.destroy()
+            
+        ctk.CTkButton(dialog, text="Ekle", command=save, fg_color="#2ECC71", hover_color="#27AE60", text_color="black").pack(pady=15)
+
+    def add_multi_press_action(self):
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Çoklu Tuş Basımı")
+        dialog.geometry("300x250")
+        dialog.grab_set()
+        
+        ctk.CTkLabel(dialog, text="Basılacak Tuş (Örn: enter, space, a):").pack(pady=10)
+        ent_key = ctk.CTkEntry(dialog)
+        ent_key.pack(pady=5)
+        
+        ctk.CTkLabel(dialog, text="Kaç kere basılsın?").pack(pady=5)
+        ent_count = ctk.CTkEntry(dialog)
+        ent_count.insert(0, "1")
+        ent_count.pack(pady=5)
+        
+        def save():
+            key = ent_key.get().strip().lower()
+            try: count = int(ent_count.get().strip())
+            except: count = 1
+            
+            if key and count > 0:
+                action = Action(type="MULTI_PRESS", params={"key": key, "count": count}, description=f"{key} ({count}x)")
+                self.current_scenario.add_action(action)
+                self.refresh_step_list()
+                if self.current_scenario.id: self.db.save_scenario(self.current_scenario)
+                dialog.destroy()
+                
+        ctk.CTkButton(dialog, text="Ekle", command=save, fg_color="#2ECC71", hover_color="#27AE60", text_color="black").pack(pady=15)
+
     def add_open_browser_action(self):
         url = simpledialog.askstring("Siteye Git", "Açılacak URL adresi (Örn: google.com):", initialvalue="https://")
         if url:
@@ -1602,7 +1588,7 @@ class MainWindow(ctk.CTk):
             if not url.startswith("http"):
                 url = "https://" + url
             
-            action = Action(type="OPEN_URL", params={"url": url}, description=f"Open URL: {url}")
+            action = Action(type="OPEN_URL", params={"url": url}, description=f"{url}")
             self.current_scenario.add_action(action)
             self.refresh_step_list()
             # v70.2: Auto-save
@@ -1612,10 +1598,16 @@ class MainWindow(ctk.CTk):
     def add_assert_action(self):
         target = filedialog.askopenfilename(title="Aranacak Görseli Seç", filetypes=[("Images", "*.png;*.jpg;*.jpeg")])
         if target:
-            action = Action(type="ASSERT_EXISTS", params={"target": target}, description=f"Assert Exists: {os.path.basename(target)}")
-            self.current_scenario.add_action(action)
+            # Görseli kütüphaneye de kaydedelim (v168.5 sızıntı önlemi)
+            name = f"assert_{os.path.basename(target)}"
+            self.db.save_asset(name, target)
+            
+            action = Action(type="ASSERT_EXISTS", params={"target": name}, description=f"{name}")
             self.current_scenario.add_action(action)
             self.refresh_step_list()
+            # v70.2: Auto-save
+            if self.current_scenario.id:
+                self.db.save_scenario(self.current_scenario)
 
     def add_variable_action(self):
         """v167.17: Değişken Tanımlama (Senaryo Ayarları)"""
@@ -1711,6 +1703,9 @@ class MainWindow(ctk.CTk):
         self.after(100, lambda: self.attributes('-topmost', False))
         
         self.btn_run.configure(state="normal", text="▶ Senaryoyu Çalıştır", fg_color="#2CC985")
+        if hasattr(self, 'btn_smart_rec'):
+            self.btn_smart_rec.configure(state="normal")
+            
         if success:
             status = "Başarılı"
         else:
@@ -1739,6 +1734,27 @@ class MainWindow(ctk.CTk):
                 messagebox.showinfo("Başarılı", f"Senaryo veritabanına kaydedildi. ID: {res}")
             else:
                 messagebox.showerror("Hata", "Veritabanına kaydedilemedi.")
+
+    def append_scenario_steps(self):
+        def on_select(scenario_to_append):
+            if not scenario_to_append or not scenario_to_append.actions:
+                messagebox.showinfo("Bilgi", "Seçilen senaryoda içe aktarılacak adım bulunamadı.")
+                return
+                
+            import copy
+            count = 0
+            for step in scenario_to_append.actions:
+                new_step = copy.deepcopy(step)
+                self.current_scenario.add_action(new_step)
+                count += 1
+                
+            self.refresh_step_list()
+            if self.current_scenario.id:
+                self.db.save_scenario(self.current_scenario)
+            messagebox.showinfo("Başarılı", f"'{scenario_to_append.name}' senaryosundan {count} adım içe aktarıldı.")
+            
+        browser = DatabaseBrowser(self, self.db, on_select)
+        browser.grab_set()
 
     def show_scenarios(self):
         if self.scenario_browser_win and self.scenario_browser_win.winfo_exists():
@@ -1788,6 +1804,104 @@ class MainWindow(ctk.CTk):
         btn_el = ctk.CTkButton(dialog, text="Element/Buton Var mı?", command=pick_element)
         btn_el.pack(pady=5, padx=20, fill="x")
 
+    def save_as_scenario(self):
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Farklı Kaydet")
+        dialog.geometry("350x150")
+        dialog.transient(self)
+        dialog.grab_set()
+        
+        ctk.CTkLabel(dialog, text="Yeni senaryo adı (Kopya):", font=("Arial", 12)).pack(pady=10)
+        
+        ent_name = ctk.CTkEntry(dialog, width=250)
+        ent_name.insert(0, f"{self.current_scenario.name} - Kopya")
+        ent_name.pack(pady=5)
+        ent_name.focus()
+        
+        def on_tamam(event=None):
+            new_name = ent_name.get().strip()
+            if new_name:
+                self.current_scenario.name = new_name
+                self.current_scenario.id = None # Force insert as a new distinct record
+                res = self.db.save_scenario(self.current_scenario)
+                if res:
+                    self.current_scenario.id = res
+                    self.title(f"AutomateX - {self.current_scenario.name}")
+                    messagebox.showinfo("Başarılı", "Yeni senaryo olarak kaydedildi.")
+                dialog.destroy()
+                
+        btn_tamam = ctk.CTkButton(dialog, text="Tamam", command=on_tamam, fg_color="#1E8449", hover_color="#117A65")
+        btn_tamam.pack(pady=10)
+        dialog.bind("<Return>", on_tamam)
+
+    def rename_scenario(self):
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Senaryoyu Yeniden Adlandır")
+        dialog.geometry("350x150")
+        dialog.transient(self)
+        dialog.grab_set()
+        
+        ctk.CTkLabel(dialog, text="Yeni isim:", font=("Arial", 12)).pack(pady=10)
+        
+        ent_name = ctk.CTkEntry(dialog, width=250)
+        ent_name.insert(0, self.current_scenario.name)
+        ent_name.pack(pady=5)
+        ent_name.focus()
+        
+        def on_tamam(event=None):
+            new_name = ent_name.get().strip()
+            if new_name:
+                self.current_scenario.name = new_name
+                if self.current_scenario.id:
+                    self.db.save_scenario(self.current_scenario)
+                self.title(f"AutomateX - {self.current_scenario.name}")
+                dialog.destroy()
+                
+        btn_tamam = ctk.CTkButton(dialog, text="Tamam", command=on_tamam, fg_color="#D68910", hover_color="#B9770E", text_color="black")
+        btn_tamam.pack(pady=10)
+        dialog.bind("<Return>", on_tamam)
+
+    def rename_step(self, index):
+        if 0 <= index < len(self.current_scenario.actions):
+            action = self.current_scenario.actions[index]
+            
+            dialog = ctk.CTkToplevel(self)
+            dialog.title("Adım İsmini Değiştir")
+            dialog.geometry("350x150")
+            dialog.transient(self)
+            dialog.grab_set()
+            
+            ctk.CTkLabel(dialog, text="Yeni adım açıklaması:", font=("Arial", 12)).pack(pady=10)
+            
+            ent_name = ctk.CTkEntry(dialog, width=250)
+            if action.description:
+                # v168.0: Eski senaryolardan kalma İngilizce prefixleri temizle ve TYPE tırnaklarını kopar
+                import re
+                desc = action.description
+                desc = re.sub(r'^(\(?Multi\)?|Type|Click|Right Click|Double Click|Wait for:|Assert Exists:|Open URL:|Open|Kill|Handle Popup:|Check:|Press Key:|Press:|Multi-Press(?:ing)?)\s*:?\s*', '', desc, flags=re.IGNORECASE)
+                
+                # Sırf "Yazı Yaz" içinde otomatik konulan çift tırnak veya tek tırnakları kırp (opsiyonel temizlik)
+                if action.type == "TYPE":
+                    if (desc.startswith("'") and desc.endswith("'")) or (desc.startswith('"') and desc.endswith('"')):
+                        desc = desc[1:-1]
+                        
+                ent_name.insert(0, desc)
+            ent_name.pack(pady=5)
+            ent_name.focus()
+            
+            def on_tamam(event=None):
+                new_desc = ent_name.get().strip()
+                if new_desc:
+                    action.description = new_desc
+                    self.refresh_step_list()
+                    if self.current_scenario.id:
+                        self.db.save_scenario(self.current_scenario)
+                dialog.destroy()
+                
+            btn_tamam = ctk.CTkButton(dialog, text="Tamam", command=on_tamam, fg_color="#F39C12", hover_color="#D68910", text_color="black")
+            btn_tamam.pack(pady=10)
+            dialog.bind("<Return>", on_tamam)
+
     def add_assert_action(self):
         # GÜNCELLEME (v51): SnipTool ile görsel seçimi ve timeout ayarı
         self.start_snip_tool(self._on_manual_assert_snip_complete)
@@ -1809,8 +1923,9 @@ class MainWindow(ctk.CTk):
             timeout = int(timeout_str) if timeout_str else 10
         except: timeout = 10
         
+        # v168.0: Save only the asset name as the target to allow portability during JSON export
         action = Action(type="ASSERT_EXISTS", 
-                        params={"target": filepath, "timeout": timeout}, 
+                        params={"target": name, "timeout": timeout}, 
                         description=f"Wait for: {name} ({timeout}s)",
                         offset=offset)
         self.current_scenario.add_action(action)
@@ -1883,16 +1998,24 @@ class MainWindow(ctk.CTk):
                     # Senaryodaki assetleri bul
                     from core.scenario import Action
                     for action_dict in sc.as_dict()["actions"]: # Dict olarak geliyor
-                        # Action dict yapısını kontrol et
                         params = action_dict.get("params", {})
+                        a_type = action_dict.get("type", "")
+                        
                         target = params.get("target")
                         if target and isinstance(target, str):
                             # Asset ismini çıkar
                             asset_name = os.path.basename(target)
                             if asset_name in asset_map:
                                 used_asset_names.add(asset_name)
-                                # Ayrıca "clean_name" olarak da asset ismini kullanıyoruz importta, o yüzden direkt asset ismini target yapıyoruz export verisinde?
-                                # Hayır, import ederken temizliyoruz.
+                                
+                        # v168.0: POPUP_CHECK Asset Support during JSON Export
+                        if a_type == "POPUP_CHECK":
+                            triggers = params.get("triggers", [])
+                            for trig in triggers:
+                                if trig.get("type") == "image":
+                                    pm_name = trig.get("value")
+                                    if pm_name and pm_name in asset_map:
+                                        used_asset_names.add(pm_name)
             
             # Embed Assets
             for name in used_asset_names:
@@ -1973,6 +2096,9 @@ class MainWindow(ctk.CTk):
                             f_out.write(binary)
                         
                         self.db.save_asset(name, tmp_path)
+                        # v168.5: Diskte lüzumsuz PNG kalmasın diye hemen sil
+                        try: os.remove(tmp_path)
+                        except: pass
                     except Exception as e:
                         print(f"Asset import hatası ({name}): {e}")
             
@@ -2069,142 +2195,6 @@ class MainWindow(ctk.CTk):
         self.refresh_step_list()
         messagebox.showinfo("Eklendi", f"'{asset_name}' kütüphaneden senaryoya eklendi.")
 
-    def show_selector_browser(self):
-        if hasattr(self, 'selector_browser_win') and self.selector_browser_win and self.selector_browser_win.winfo_exists():
-            self.selector_browser_win.focus_force()
-            self.selector_browser_win.lift()
-            return
-
-        def on_select(selector_data):
-            pass
-
-        self.selector_browser_win = SelectorBrowser(self, self.db, on_select, mode="view")
-        self.selector_browser_win.grab_set()
-
-    def start_inspector(self, click_type="left"):
-        # v80: Lauch Spy Tool
-        self.last_click_type = click_type # Store for callback
-        self.iconify() # Hide window
-        InspectorOverlay(self, self._on_spy_selected)
-        
-    def _on_spy_selected(self, *args):
-        self.deiconify() # Show window
-        
-        click_type = getattr(self, "last_click_type", "left")
-        
-        # Handle different callback signatures
-        selector = None
-        desc = ""
-        image_data = None # v110: Image Support
-        
-        if len(args) == 1:
-            selector = args[0]
-            desc = "Selector Action"
-        elif len(args) == 3:
-            _, selector, desc = args
-        elif len(args) == 4:
-            _, selector, desc, image_data = args
-        else:
-            return
-
-        if not selector: return
-
-        # v130: Volatile Attribute Filtering (Input Sanitization)
-        # If AutomationId exists and ControlType suggests input (Edit, Document),
-        # Remove 'ControlName' because it likely contains the input text (Value).
-        # v130+ Broadened Volatile Types
-        # Some inputs appear as Text, Pane, Group in UIA.
-        volatile_types = ["EditControl", "DocumentControl", "ComboBoxControl", 
-                          "TextControl", "PaneControl", "GroupControl", "CustomControl"]
-        
-        # We should prompt if there is a Name that might be dynamic content.
-        # But for Pane/Group, Name might be static label.
-        # For Edit/Document, Name IS usually the content.
-        
-        should_prompt = False
-        val_name = selector.get("ControlName")
-        ctype = selector.get("ControlType")
-
-        if val_name:
-            if ctype in ["EditControl", "DocumentControl", "ComboBoxControl"]:
-                 should_prompt = True
-            elif ctype in ["TextControl", "PaneControl", "GroupControl", "CustomControl"]:
-                 # heuristic: if name is numeric or looks like data
-                 if val_name.isdigit() or len(val_name) > 20: 
-                     should_prompt = True
-                 # Or if we have an AutomationId, maybe we can afford to ask
-                 elif selector.get("AutomationId"):
-                     should_prompt = True
-
-        if should_prompt:
-            val_name = selector.get("ControlName")
-            # ...
-            val_name = selector.get("ControlName")
-            if val_name:
-                # v130+ Prompt User
-                msg = (f"Bu bir giriş alanı ve metin içeriyor ('{val_name}').\n\n"
-                       "Selector'a metin içeriğini de eklemek ister misiniz?\n\n"
-                       "EVET: Sadece bu metni içerdiğinde bulur (Doğrulama için).\n"
-                       "HAYIR: Metin ne olursa olsun bulur (Veri girişi için - Önerilen).")
-                
-                if not messagebox.askyesno("Metin İçeriği", msg):
-                    removed_val = selector.pop("ControlName")
-                    print(f"Volatile attribute filtered by user request: ControlName='{removed_val}'")
-
-        # Ask User for Name (for DB and Action)
-        default_name = selector.get("ControlName") or selector.get("AutomationId") or "Element"
-        name = simpledialog.askstring("Seçiciyi Kaydet", "Bu element için bir isim girin:", initialvalue=default_name)
-        
-        if not name: return
-
-        # Save to DB (v110: pass image_data)
-        self.db.save_selector(name, selector, image_data=image_data)
-
-        # v160.1: Also save as Visual Element (Asset) if image exists
-        if image_data:
-            # Use a prefix to distinguish, or just the same name?
-            # User wants: "Kaydettiğimiz selector görsellerini aynı zamanda Visual Elements e de kaydedelim"
-            # Let's use the same name to be neat, maybe with a prefix if needed, but name should be unique in assets too?
-            # Assets and Selectors are different tables, but let's try to keep name unique or just save it.
-            # If name exists in assets, it might duplicate or error. save_asset creates new entry.
-            self.db.save_asset(name, image_data)  # Pass bytes directly
-        
-        # Create Action
-        # We use the NAME as reference if we want to be like 'Asset', but for now let's embed the selector 
-        # OR use the name to look it up? 
-        # The user request says "Visual Elements" (repo) and "Selectors" (repo). 
-        # So we should probably store the ID or Name.
-        # But for robust execution, embedding the selector in params is better, 
-        # and maybe just referencing the name for UI.
-        
-        # Let's create a "CLICK_SELECTOR" action
-        params = {
-            "selector": selector, # Embed for now (or could use ID if we implement a driver that reads from DB)
-            "selector_name": name,
-            "button": click_type,
-            "timeout": 10
-        }
-        
-        type_desc = "Click"
-        if click_type == "right": type_desc = "Right Click"
-        elif click_type == "double": type_desc = "Double Click"
-
-        action = Action(type="CLICK_SELECTOR", params=params, description=f"{type_desc}: {name}")
-        self.current_scenario.add_action(action)
-        self.refresh_step_list()
-        
-        if self.current_scenario.id:
-            self.db.save_scenario(self.current_scenario)
-            
-        messagebox.showinfo("Başarılı", "Seçici kaydedildi ve aksiyon eklendi!")
-        # We need to implement TYPE_SELECTOR in runner loop too if not exists
-        # For now let's stick to known types or map them.
-        # Actually structure_driver.type_text? No, just click and type using Keyboard.
-        # Let's add explicit 'TYPE_SELECTOR' support later or map to Click+Type
-        ctk.CTkButton(dialog, text="Ekle", command=apply).pack(pady=20)
-        
-        # Wait for dialog
-        dialog.wait_window()
 
 
 class AssetBrowser(ctk.CTkToplevel):
@@ -2258,7 +2248,7 @@ class AssetBrowser(ctk.CTkToplevel):
                     print(f"Error loading image for preview: {e}")
             
             # Metadata
-            lbl_info = ctk.CTkLabel(frame, text=f"{name}\n({len(data or b'')/1024:.1f} KB)", anchor="w", justify="left")
+            lbl_info = ctk.CTkLabel(frame, text=f"ID: {a_id} - {name}\n({len(data or b'')/1024:.1f} KB)", anchor="w", justify="left")
             lbl_info.pack(side="left", padx=10, expand=True, fill="x")
             
             # Button Logic
@@ -2345,6 +2335,9 @@ class DatabaseBrowser(ctk.CTkToplevel):
             btn_load = ctk.CTkButton(frame, text="Seç", width=60, command=lambda i=s_id: self.load_one(i))
             btn_load.pack(side="right", padx=5, pady=5)
             
+            btn_rename = ctk.CTkButton(frame, text="🖍️", width=30, fg_color="#F39C12", hover_color="#D68910", text_color="black", command=lambda i=s_id: self.rename_one(i))
+            btn_rename.pack(side="right", padx=2)
+            
             btn_del = ctk.CTkButton(frame, text="🗑️", width=30, fg_color="red", command=lambda i=s_id: self.delete_one(i))
             btn_del.pack(side="right", padx=2)
 
@@ -2354,6 +2347,15 @@ class DatabaseBrowser(ctk.CTkToplevel):
             self.callback(scenario)
             self.destroy()
 
+    def rename_one(self, s_id):
+        scenario = self.db.load_scenario_by_id(s_id)
+        if scenario:
+            new_name = simpledialog.askstring("Yeniden Adlandır", "Yeni isim:", initialvalue=scenario.name, parent=self)
+            if new_name and new_name.strip():
+                scenario.name = new_name.strip()
+                self.db.save_scenario(scenario)
+                self.refresh_list()
+
     def delete_one(self, s_id):
         if messagebox.askyesno("Onay", "Bu senaryoyu silmek istediğinize emin misiniz?"):
             if self.db.delete_scenario(s_id):
@@ -2362,165 +2364,3 @@ class DatabaseBrowser(ctk.CTkToplevel):
                 messagebox.showerror("Hata", "Silinemedi.")
 
 
-class SelectorBrowser(ctk.CTkToplevel):
-    def __init__(self, master, db, callback, mode="view"):
-        super().__init__(master)
-        self.title("Seçici Kütüphanesi")
-        self.geometry("800x600") # v167.32: Genişletildi
-        self.db = db
-        self.callback = callback
-        self.mode = mode
-        self.pil_image_refs = []
-        
-        self.lbl = ctk.CTkLabel(self, text="Kayıtlı Seçiciler (Selectors)", font=("Arial", 16, "bold"))
-        self.lbl.pack(pady=10)
-        
-        self.scrollable_frame = ctk.CTkScrollableFrame(self)
-        self.scrollable_frame.pack(expand=True, fill="both", padx=10, pady=10)
-        
-        self.refresh_list()
-        
-    def refresh_list(self):
-        for widget in self.scrollable_frame.winfo_children():
-            widget.destroy()
-        self.pil_image_refs = [] # Referansları tut
-            
-        selectors = self.db.list_selectors()
-        
-        if not selectors:
-            ctk.CTkLabel(self.scrollable_frame, text="Henüz kayıtlı seçici yok.", text_color="gray").pack(pady=20)
-            return
-
-        for sel in selectors:
-            # sel: (id, name, type, content, created_at, image_data)
-            # Eski şema/veriyi zarifçe işle
-            if len(sel) == 6:
-                sel_id, name, sel_type, content, created_at, image_data = sel
-            else:
-                sel_id, name, sel_type, content, created_at = sel
-                image_data = None
-            
-            frame = ctk.CTkFrame(self.scrollable_frame)
-            frame.pack(fill="x", pady=5, padx=5)
-            
-            # v167.33: Layout Refactor - Top Row (Content), Bottom Row (Buttons)
-            top_row = ctk.CTkFrame(frame, fg_color="transparent")
-            top_row.pack(fill="x", padx=5, pady=5)
-            
-            # --- Görsel Küçük Resim (Sol) ---
-            if image_data:
-                try:
-                    import io
-                    from PIL import Image, ImageTk
-                    pil_img = Image.open(io.BytesIO(image_data))
-                    pil_img.thumbnail((80, 80)) # Seçiciler için daha büyük küçük resim
-                    tk_img = ImageTk.PhotoImage(pil_img)
-                    self.pil_image_refs.append(tk_img)
-                    
-                    img_lbl = ctk.CTkLabel(top_row, image=tk_img, text="")
-                    img_lbl.pack(side="left", padx=5, pady=5)
-                except Exception as e:
-                    print(f"Selector görseli yükleme hatası: {e}")
-
-            # --- Bilgi (Orta) ---
-            info_frame = ctk.CTkFrame(top_row, fg_color="transparent")
-            info_frame.pack(side="left", padx=10, pady=5, fill="x", expand=True)
-            
-            # v167.32: Uzun isimleri kısalt
-            display_name = name
-            if len(display_name) > 40:
-                display_name = display_name[:37] + "..."
-            
-            ctk.CTkLabel(info_frame, text=display_name, font=("Arial", 14, "bold")).pack(anchor="w")
-            ctk.CTkLabel(info_frame, text=f"Type: {sel_type} | Date: {created_at}", font=("Arial", 10)).pack(anchor="w")
-            
-            # Tam İçeriği Göster (Sarılabilir)
-            content_str = str(content)
-            txt = ctk.CTkTextbox(info_frame, height=60, font=("Consolas", 10), activate_scrollbars=True)
-            txt.insert("1.0", content_str)
-            txt.configure(state="disabled") # Salt-okunur
-            txt.pack(fill="x", pady=2)
-
-            # --- Kontroller (Alt Satır) ---
-            # v167.33: Butonları alta taşı
-            btn_frame = ctk.CTkFrame(frame, fg_color="transparent")
-            btn_frame.pack(fill="x", padx=10, pady=5) # side default top (under top_row)
-            
-            # Butonları sağa yasla (veya ortaya)
-            # Zoom Butonu (Sadece görsel varsa)
-            if image_data:
-                ctk.CTkButton(btn_frame, text="🔍", width=30, fg_color="gray", 
-                              command=lambda d=image_data, n=name: self.show_zoom(d, n)).pack(side="left", padx=2)
-
-            # Düzenle Butonu (Kalem)
-            ctk.CTkButton(btn_frame, text="✏️", width=30, fg_color="orange", 
-                          command=lambda i=sel_id, c=content, n=name: self.edit_selector(i, n, c)).pack(side="left", padx=2)
-
-            # Sil Butonu
-            ctk.CTkButton(btn_frame, text="🗑️", width=40, fg_color="darkred", 
-                          command=lambda i=sel_id: self.delete_selector(i)).pack(side="left", padx=2)
-
-            # v161.0: Seç Butonu (Sadece 'pick' modunda) - EN SAĞA (ÖNEMLİ)
-            if self.mode == "pick":
-                ctk.CTkButton(btn_frame, text="✅ SEÇ", width=100, fg_color="#27AE60", hover_color="#1E8449", font=("Arial", 12, "bold"),
-                              command=lambda s=sel: self.callback(s)).pack(side="right", padx=5)
-                          
-    def edit_selector(self, s_id, name, content_str):
-        """v125: Seçici Düzenle (İndeks Ekle, vb.)"""
-        try:
-            # Mevcut içeriği ayrıştır
-            import json
-            current_data = json.loads(content_str) if isinstance(content_str, str) else content_str
-        except:
-            current_data = {}
-
-        # Yeni İndeks İste
-        current_idx = current_data.get("foundIndex", 1)
-        
-        # Şimdilik Basit Girdi Diyalogu (tam JSON düzenlemeye genişletilebilir)
-        new_idx = simpledialog.askinteger("Düzenle", f"'{name}' için Index numarası girin:\n(1 = İlk bulunan, 2 = İkinci...)", initialvalue=current_idx, minvalue=1)
-        
-        if new_idx is not None:
-            current_data["foundIndex"] = new_idx
-            
-            # Geri kaydet
-            new_content = json.dumps(current_data)
-            if self.db.update_selector(s_id, new_content):
-                messagebox.showinfo("Başarılı", f"Selector güncellendi! (Index: {new_idx})")
-                self.refresh_list()
-            else:
-                messagebox.showerror("Hata", "Güncelleme başarısız.")
-
-    def show_zoom(self, data, name):
-        """v115: Selector Resim Büyütme (Zoom)"""
-        if not data: return
-        
-        top = ctk.CTkToplevel(self)
-        top.title(f"Önizleme: {name}")
-        top.attributes('-topmost', True) 
-        top.geometry("800x600")
-        
-        try:
-            import io
-            from PIL import Image, ImageTk
-            pil_img = Image.open(io.BytesIO(data))
-            
-            # Ekrana sığdır
-            img_w, img_h = pil_img.size
-            if img_w > 800 or img_h > 600:
-                pil_img.thumbnail((800, 600))
-                
-            tk_img = ImageTk.PhotoImage(pil_img)
-            
-            lbl = ctk.CTkLabel(top, text="", image=tk_img)
-            lbl.image = tk_img # Referansı tut
-            lbl.pack(expand=True, fill="both")
-        except Exception as e:
-            messagebox.showerror("Hata", f"Görüntülenemedi: {e}")
-
-    def delete_selector(self, selector_id):
-        if messagebox.askyesno("Onay", "Bu seçiciyi silmek istediğinize emin misiniz?"):
-            if self.db.delete_selector(selector_id):
-                self.refresh_list()
-            else:
-                messagebox.showerror("Hata", "Silinemedi.")

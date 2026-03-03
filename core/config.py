@@ -18,7 +18,7 @@ LOGS_DIR = os.path.join(DATA_DIR, "logs")
 DB_PATH = os.path.join(DATA_DIR, "automation.db")
 
 # Uygulama Sürümü
-APP_VERSION = "v167.37"
+APP_VERSION = "v168.0"
 
 def get_dpi_scaling():
     """DPI Ölçeklendirme çarpanını hesaplar."""
